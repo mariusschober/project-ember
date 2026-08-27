@@ -1,7 +1,8 @@
-# Project Ember 0.2.0 local beta
+# Project Ember 0.3.0 local beta
 
 This release extends the original built-in-display beta to every compatible
-connected display and adds optional local Sun scheduling.
+connected display, adds optional local Sun scheduling, and hardens the
+existing app for continuous menu-bar operation.
 
 Included:
 
@@ -18,7 +19,11 @@ Included:
 - a one-view Sun schedule control and per-display status copy;
 - 55 deterministic core checks plus reversible two-display system, lifecycle,
   and crash-recovery tests;
-- no accounts, licensing, telemetry, or network services.
+- no accounts, licensing, telemetry, or network services;
+- production hardening: 5 s backlight guard (80% fewer wakeups), coalesced
+  slider updates, separate solar/ retry timers, robust sleep/wake and
+  pending-restore handling, atomic journal with 600 permissions and no-backup
+  flag, and paused orb animation while idle.
 
 True grayscale and E-Ink simulation were evaluated and intentionally discarded:
 the safe gamma-table pipeline cannot perform the required cross-channel mixing.

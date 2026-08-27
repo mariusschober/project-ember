@@ -3,7 +3,7 @@
 Project Ember is a native macOS menu-bar display controller for Apple-silicon
 Macs. It is an independent product with original naming and interface.
 
-## What works in 0.2
+## What works in 0.3
 
 - One shared warmth and apparent-brightness profile on every compatible display
 - Verified support for the built-in Liquid Retina XDR panel and a Dell S2419H
@@ -29,7 +29,7 @@ all solar calculations on-device.
 
 ## Install the local beta
 
-1. Open `Project-Ember-0.2.0-local-beta.dmg`.
+1. Open `Project-Ember-0.3.0-local-beta.dmg`.
 2. Drag Project Ember into Applications.
 3. Because this local beta is not notarized, Control-click the app, choose
    **Open**, and confirm once.
