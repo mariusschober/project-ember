@@ -1,0 +1,41 @@
+# SwiftPM build
+.build/
+.swiftpm/
+*.o
+*.d
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# App artifacts
+*.app
+*.dmg
+*.pkg
+
+# Work directories (outside repo but ignore if copied)
+work/
+outputs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary
+*.tmp
+*.temp
