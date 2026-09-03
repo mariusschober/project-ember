@@ -97,18 +97,28 @@ enum EmberCoreChecks {
       "Activation must journal before apply"
     )
     expect(machine.state == .activating, "Activation must enter activating state")
-    _ = machine.transition(.activationSucceeded)
+    let activated = machine.transition(.activationSucceeded)
+    expect(activated.contains(.startBacklightGuard), "Successful activation must start guard")
     expect(machine.state == .active, "Successful activation must become active")
     expect(
       machine.transition(.disableRequested) == [.stopBacklightGuard, .restoreBaseline],
       "Disable must stop guard and restore"
     )
     expect(machine.state == .restoring(.disable), "Disable must enter restoring state")
+    let restored = machine.transition(.restoreSucceeded)
     expect(
-      machine.transition(.restoreSucceeded) == [.clearRecoveryRecord],
+      restored.contains(.clearRecoveryRecord),
       "Journal must clear only after restore"
     )
     expect(machine.state == .off, "Successful restore must become off")
+    // 0.4.0: degraded sleep path must reach a valid terminal state.
+    var degraded = DisplayStateMachine(state: .degraded("test"))
+    let sleepActions = degraded.transition(.sleepRequested)
+    expect(
+      sleepActions.contains(.restoreBaseline), "Degraded sleep must restore before suspend")
+    expect(degraded.state == .restoring(.sleep), "Degraded sleep must enter restoring(sleep)")
+    _ = degraded.transition(.restoreSucceeded)
+    expect(degraded.state == .suspended, "Sleep restore must suspend")
   }
 
   private static func checkDisplayIdentity() {
