@@ -1,90 +1,10 @@
 import AppKit
 
 @MainActor
-final class EmberPowerButton: NSButton {
-  private let bgLayer = CALayer()
-  private let iconView = NSImageView()
-
-  override init(frame frameRect: NSRect) {
-    super.init(frame: frameRect)
-    wantsLayer = true
-    layer?.masksToBounds = false
-    isBordered = false
-    bezelStyle = .regularSquare
-    title = ""
-    imagePosition = .imageOnly
-
-    bgLayer.cornerRadius = 16
-    bgLayer.masksToBounds = true
-    bgLayer.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1.0).cgColor
-    bgLayer.borderWidth = 1
-    bgLayer.borderColor = EmberColor.borderSubtle.cgColor
-    layer?.addSublayer(bgLayer)
-
-    iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-    iconView.contentTintColor = EmberColor.textTertiary
-    iconView.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(iconView)
-    iconView.image = NSImage(systemSymbolName: "power", accessibilityDescription: "Power")
-    NSLayoutConstraint.activate([
-      iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
-      iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      widthAnchor.constraint(equalToConstant: 32),
-      heightAnchor.constraint(equalToConstant: 32),
-    ])
-
-    wantsLayer = true
-    // hover tracking
-    let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
-    addTrackingArea(area)
-  }
-
-  required init?(coder: NSCoder) { fatalError() }
-
-  override func layout() {
-    super.layout()
-    bgLayer.frame = bounds
-    bgLayer.cornerRadius = bounds.height/2
-  }
-
-  var isActiveState = false {
-    didSet { updateAppearance() }
-  }
-
-  private func updateAppearance() {
-    if isActiveState {
-      bgLayer.backgroundColor = NSColor(calibratedRed: 0.32, green: 0.16, blue: 0.13, alpha: 1.0).cgColor
-      bgLayer.borderColor = EmberColor.ember500.withAlphaComponent(0.28).cgColor
-      bgLayer.shadowColor = EmberColor.ember500.cgColor
-      bgLayer.shadowOpacity = 0.32
-      bgLayer.shadowRadius = 8
-      bgLayer.shadowOffset = .zero
-      iconView.contentTintColor = EmberColor.ember400
-    } else {
-      bgLayer.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1.0).cgColor
-      bgLayer.borderColor = EmberColor.borderSubtle.cgColor
-      bgLayer.shadowOpacity = 0
-      iconView.contentTintColor = EmberColor.textTertiary
-    }
-  }
-
-  override func mouseEntered(with event: NSEvent) {
-    super.mouseEntered(with: event)
-    bgLayer.borderColor = EmberColor.textMuted.withAlphaComponent(0.18).cgColor
-  }
-  override func mouseExited(with event: NSEvent) {
-    super.mouseExited(with: event)
-    updateAppearance()
-  }
-}
-
-@MainActor
 final class EmberHeaderView: NSView {
   let iconView = NSImageView()
   let titleLabel = NSTextField(labelWithString: "EMBER")
   let subtitleLabel = NSTextField(labelWithString: "Reduces short-wavelength display output for evening use.")
-  let powerButton = EmberPowerButton(frame: .zero)
-  let stateLabel = NSTextField(labelWithString: "OFF")
   let betaLabel = NSTextField(labelWithString: "BETA") // kept for compatibility, hidden
 
   override init(frame frameRect: NSRect) {
@@ -122,9 +42,8 @@ final class EmberHeaderView: NSView {
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-    powerButton.translatesAutoresizingMaskIntoConstraints = false
-
-    let row = NSStackView(views: [iconView, textStack, spacer, stateLabel, powerButton])
+    // The hero orb is the panel's on/off control; the header is static branding.
+    let row = NSStackView(views: [iconView, textStack, spacer])
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 9
@@ -146,22 +65,17 @@ final class EmberHeaderView: NSView {
   func setBetaHidden(_ hidden: Bool) {
     betaLabel.isHidden = hidden
   }
-  func setState(isActive: Bool) {
-    let title = isActive ? "ON" : "OFF"
-    let attr = NSMutableAttributedString(string: title)
-    attr.addAttribute(.kern, value: 0.8, range: NSRange(location: 0, length: title.count))
-    attr.addAttribute(.font, value: NSFont.systemFont(ofSize: 10, weight: .semibold), range: NSRange(location: 0, length: title.count))
-    attr.addAttribute(.foregroundColor, value: isActive ? EmberColor.ember400 : EmberColor.textTertiary, range: NSRange(location: 0, length: title.count))
-    stateLabel.attributedStringValue = attr
-  }
 }
 
 @MainActor
 final class EmberFooterBarView: NSView {
   let heartView = NSImageView()
-  let textLabel = NSTextField(labelWithString: "")
+  let prefixLabel = NSTextField(labelWithString: "Designed by\u{00A0}")
+  let authorButton = NSButton(title: "Marius Schober", target: nil, action: nil)
+  let suffixLabel = NSTextField(labelWithString: "\u{00A0}for circadian-aware evenings")
   let betaBadge = NSTextField(labelWithString: "BETA")
   let versionLabel = NSTextField(labelWithString: "v0.4.0")
+  private static let authorURL = URL(string: "https://mariusschober.com/")!
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -177,8 +91,24 @@ final class EmberFooterBarView: NSView {
     heartView.widthAnchor.constraint(equalToConstant: 14).isActive = true
     heartView.heightAnchor.constraint(equalToConstant: 14).isActive = true
 
-    textLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-    textLabel.textColor = EmberColor.textSecondary
+    prefixLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+    prefixLabel.textColor = EmberColor.textSecondary
+    suffixLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+    suffixLabel.textColor = EmberColor.textSecondary
+    for label in [prefixLabel, suffixLabel] {
+      label.lineBreakMode = .byTruncatingTail
+    }
+
+    authorButton.bezelStyle = .inline
+    authorButton.isBordered = false
+    authorButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    authorButton.contentTintColor = EmberColor.ember400
+    authorButton.target = self
+    authorButton.action = #selector(openAuthorLink)
+    authorButton.toolTip = "Open mariusschober.com"
+    authorButton.setAccessibilityLabel("Marius Schober")
+    authorButton.setAccessibilityHelp("Opens the author's website.")
+    authorButton.setAccessibilityRole(.link)
 
     betaBadge.font = NSFont.systemFont(ofSize: 9, weight: .bold)
     betaBadge.textColor = EmberColor.ember400
@@ -195,9 +125,9 @@ final class EmberFooterBarView: NSView {
     versionLabel.layer?.cornerRadius = 6
     versionLabel.layer?.masksToBounds = true
 
-    let left = NSStackView(views: [heartView, textLabel])
+    let left = NSStackView(views: [heartView, prefixLabel, authorButton, suffixLabel])
     left.orientation = .horizontal
-    left.spacing = 6
+    left.spacing = 0
     left.alignment = .centerY
 
     let spacer = NSView()
@@ -225,17 +155,72 @@ final class EmberFooterBarView: NSView {
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
 
-  func setText(circadianPrefix: String = "Designed by Marius Schober ", circadianAccent: String = "for circadian-aware evenings", version: String = "v0.4.0") {
-    let full = circadianPrefix + circadianAccent
-    let attr = NSMutableAttributedString(string: full)
-    attr.addAttribute(.foregroundColor, value: EmberColor.textSecondary, range: NSRange(location: 0, length: full.count))
-    attr.addAttribute(.font, value: NSFont.systemFont(ofSize: 11, weight: .regular), range: NSRange(location: 0, length: full.count))
-    let range = (full as NSString).range(of: circadianAccent)
-    attr.addAttribute(.foregroundColor, value: EmberColor.ember400, range: range)
-    attr.addAttribute(.font, value: NSFont.systemFont(ofSize: 11, weight: .medium), range: range)
-    textLabel.attributedStringValue = attr
+  func setText(version: String = AppVersionDisplay.fallback) {
     versionLabel.stringValue = "  \(version)  "
   }
+
+  private var authorCursorPushed = false
+
+  override func layout() {
+    super.layout()
+    // Keep the author-link hover area glued to the button frame.
+    updateTrackingAreas()
+  }
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    // Underline the author link on hover only; calm plain text otherwise.
+    for area in trackingAreas where (area.userInfo?["authorLink"] as? Bool) == true {
+      removeTrackingArea(area)
+    }
+    addTrackingArea(NSTrackingArea(
+      rect: authorButton.frame,
+      options: [.mouseEnteredAndExited, .activeInKeyWindow],
+      owner: self, userInfo: ["authorLink": true]))
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    super.mouseEntered(with: event)
+    setAuthorUnderline(true)
+    if !authorCursorPushed {
+      NSCursor.pointingHand.push()
+      authorCursorPushed = true
+    }
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    super.mouseExited(with: event)
+    setAuthorUnderline(false)
+    if authorCursorPushed {
+      NSCursor.pop()
+      authorCursorPushed = false
+    }
+  }
+
+  private func setAuthorUnderline(_ underline: Bool) {
+    let title = authorButton.title
+    let attr = NSMutableAttributedString(string: title)
+    attr.addAttribute(
+      .font, value: NSFont.systemFont(ofSize: 11, weight: .medium),
+      range: NSRange(location: 0, length: attr.length))
+    attr.addAttribute(
+      .foregroundColor, value: EmberColor.ember400,
+      range: NSRange(location: 0, length: attr.length))
+    if underline {
+      attr.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue,
+        range: NSRange(location: 0, length: attr.length))
+    }
+    authorButton.attributedTitle = attr
+  }
+
+  @objc private func openAuthorLink() {
+    NSWorkspace.shared.open(Self.authorURL)
+  }
+}
+
+/// Version fallback without importing EmberCore into this UI file's contract.
+private enum AppVersionDisplay {
+  static let fallback = "v0.4.0"
 }
 
 @MainActor

@@ -71,11 +71,28 @@ enum EmberMetrics {
   static let contentHInset: CGFloat = 16
   static let cardCorner: CGFloat = 14
   static let pillCorner: CGFloat = 18
-  static let rowHeight: CGFloat = 64
+  static let rowHeight: CGFloat = 56
+  // Shared row grid: every row type (toggle, behavior, slider icon) aligns
+  // icons and trailing controls to these insets so columns line up.
+  static let rowLeadingInset: CGFloat = 14
+  static let rowTrailingInset: CGFloat = 14
+  static let rowIconWidth: CGFloat = 20
+  static let rowIconTextGap: CGFloat = 10
+  static let rowMinHeight: CGFloat = 56
+  static let rowTopPadding: CGFloat = 10
+  static let rowBottomPadding: CGFloat = 10
+  // Pill preset geometry: outer breathing room from the container edge plus
+  // internal relief around the label so the highlight never hugs text.
+  static let pillHeight: CGFloat = 42
+  static let pillStackInset: CGFloat = 5
+  static let pillIndicatorHInset: CGFloat = 12
+  static let pillIndicatorVInset: CGFloat = 4
   static let sliderThumb: CGFloat = 22
   static let sliderTrackHeight: CGFloat = 4
-  static let heroHeight: CGFloat = 148
-  static let headerHeight: CGFloat = 44
+  static let sliderEndInset: CGFloat = 14 // thumbSize/2 + 3: keeps thumbs fully visible at 0%/100%
+  static let stackSpacing: CGFloat = 10
+  static let heroHeight: CGFloat = 128
+  static let headerHeight: CGFloat = 40
   static let footerBarHeight: CGFloat = 36
 }
 

@@ -4,7 +4,6 @@ import AppKit
 final class EmberSwitch: NSControl {
   private let trackLayer = CALayer()
   private let thumbLayer = CALayer()
-  private let thumbShadow = CALayer()
 
   private var _isOn = false
   var isOn: Bool {
@@ -167,7 +166,7 @@ final class EmberToggleRowView: NSView {
   let iconView = NSImageView()
   let titleLabel = NSTextField(labelWithString: "")
   let detailLabel = NSTextField(wrappingLabelWithString: "")
-  let captionLabel = NSTextField(labelWithString: "")
+  let captionLabel = NSTextField(wrappingLabelWithString: "")
   let toggle = EmberSwitch()
   var actionButton: NSButton?
 
@@ -196,7 +195,6 @@ final class EmberToggleRowView: NSView {
     detailLabel.font = EmberFont.rowDetail()
     detailLabel.textColor = EmberColor.textSecondary
     detailLabel.maximumNumberOfLines = 2
-    detailLabel.preferredMaxLayoutWidth = 244
     detailLabel.lineBreakMode = .byWordWrapping
     detailLabel.setContentHuggingPriority(.defaultLow, for: .vertical)
 
@@ -205,7 +203,6 @@ final class EmberToggleRowView: NSView {
     captionLabel.isHidden = true
     captionLabel.maximumNumberOfLines = 2
     captionLabel.lineBreakMode = .byWordWrapping
-    captionLabel.preferredMaxLayoutWidth = 244
     captionLabel.setContentHuggingPriority(.defaultLow, for: .vertical)
 
     let textStack = NSStackView(views: [titleLabel, detailLabel, captionLabel])
@@ -226,31 +223,51 @@ final class EmberToggleRowView: NSView {
 
     // Stable top/title grid: icon and switch align to the title line, detail
     // and caption grow downward. Title baselines stay identical across rows.
+    // All insets come from the shared EmberMetrics row grid so toggle rows,
+    // the behavior row, and slider icon columns line up.
     addSubview(iconView)
     addSubview(textStack)
     addSubview(toggle)
     NSLayoutConstraint.activate([
-      iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+      iconView.leadingAnchor.constraint(
+        equalTo: leadingAnchor, constant: EmberMetrics.rowLeadingInset),
       iconView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: 20),
-      iconView.heightAnchor.constraint(equalToConstant: 20),
+      iconView.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
+      iconView.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
 
-      toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+      toggle.trailingAnchor.constraint(
+        equalTo: trailingAnchor, constant: -EmberMetrics.rowTrailingInset),
       toggle.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
       toggle.widthAnchor.constraint(equalToConstant: 44),
       toggle.heightAnchor.constraint(equalToConstant: 26),
 
-      textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+      textStack.leadingAnchor.constraint(
+        equalTo: iconView.trailingAnchor, constant: EmberMetrics.rowIconTextGap),
       textStack.trailingAnchor.constraint(equalTo: toggle.leadingAnchor, constant: -12),
-      textStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-      textStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
-      heightAnchor.constraint(greaterThanOrEqualToConstant: 64),
+      textStack.topAnchor.constraint(
+        equalTo: topAnchor, constant: EmberMetrics.rowTopPadding),
+      textStack.bottomAnchor.constraint(
+        lessThanOrEqualTo: bottomAnchor, constant: -EmberMetrics.rowBottomPadding),
+      heightAnchor.constraint(greaterThanOrEqualToConstant: EmberMetrics.rowMinHeight),
     ])
-    let h81 = heightAnchor.constraint(equalToConstant: 64)
-    h81.priority = .defaultHigh
-    h81.isActive = true
+    let minHeight = heightAnchor.constraint(equalToConstant: EmberMetrics.rowMinHeight)
+    minHeight.priority = .defaultHigh
+    minHeight.isActive = true
     // Ensure textStack doesn't compress toggle
     textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+  }
+
+  override func layout() {
+    super.layout()
+    // Derive wrapping widths from the actual text width so rows share one
+    // wrap point instead of a stale fixed constant.
+    let textWidth = max(0, bounds.width - EmberMetrics.rowLeadingInset
+      - EmberMetrics.rowTrailingInset - EmberMetrics.rowIconWidth
+      - EmberMetrics.rowIconTextGap - 44 - 12)
+    if textWidth > 0 {
+      detailLabel.preferredMaxLayoutWidth = textWidth
+      captionLabel.preferredMaxLayoutWidth = textWidth
+    }
   }
 
   @available(*, unavailable)

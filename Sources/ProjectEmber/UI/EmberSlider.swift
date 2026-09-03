@@ -18,8 +18,14 @@ final class EmberSliderCell: NSSliderCell {
     let alpha: CGFloat = isEnabled ? 1 : 0.42
 
     let trackHeight: CGFloat = EmberMetrics.sliderTrackHeight
+    // Inset the track by half the thumb plus padding so the 22pt thumb stays
+    // fully visible at 0% and 100% (knobRect uses the same insets, keeping
+    // track and knob mappings in agreement).
+    let endInset = EmberMetrics.sliderEndInset
     let y = rect.midY - trackHeight/2
-    let trackRect = NSRect(x: rect.minX + 2, y: y, width: rect.width - 4, height: trackHeight)
+    let trackRect = NSRect(
+      x: rect.minX + endInset, y: y,
+      width: max(0, rect.width - (endInset * 2)), height: trackHeight)
     let path = NSBezierPath(roundedRect: trackRect, xRadius: trackHeight/2, yRadius: trackHeight/2)
 
     NSGraphicsContext.saveGraphicsState()
@@ -143,9 +149,20 @@ final class EmberSliderCell: NSSliderCell {
   }
 
   override func knobRect(flipped: Bool) -> NSRect {
-    let rect = super.knobRect(flipped: flipped)
-    // Keep centered, but ensure size matches our thumb
-    return rect
+    // Map the value range onto the same inset track drawBar uses, so the knob
+    // center always sits on the track and the full thumb stays in bounds.
+    guard let slider = controlView as? NSSlider else { return super.knobRect(flipped: flipped) }
+    let bounds = slider.bounds
+    let endInset = EmberMetrics.sliderEndInset
+    let usable = max(0, bounds.width - (endInset * 2))
+    let ratio: CGFloat =
+      maxValue == minValue ? 0 : CGFloat((doubleValue - minValue) / (maxValue - minValue))
+    let centerX = endInset + (usable * min(max(ratio, 0), 1))
+    let size = EmberMetrics.sliderThumb
+    // NSSliderCell knob thickness follows the control height; center vertically.
+    let knobHeight = super.knobRect(flipped: flipped).height
+    let centerY = bounds.midY
+    return NSRect(x: centerX - size / 2, y: centerY - knobHeight / 2, width: size, height: knobHeight)
   }
 }
 

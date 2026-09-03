@@ -16,7 +16,7 @@ final class ControlPanelViewController: NSViewController {
   private let brightnessSlider = EmberSlider(variant: .brightness, value: 75, minValue: 10, maxValue: 100, target: nil, action: nil)
   private let brightnessValue = NSTextField(labelWithString: "75%")
 
-  private let backlightRow = EmberToggleRowView(iconSymbol: "shield.lefthalf.filled", title: "Backlight Lock", detail: "Keeps a compatible built-in display at full hardware brightness while Ember dims in software.")
+  private let backlightRow = EmberToggleRowView(iconSymbol: "shield.lefthalf.filled", title: "Backlight Lock", detail: "Full hardware brightness while Ember dims in software.")
   private let sunScheduleRow = EmberToggleRowView(iconSymbol: "sun.horizon", title: "Sun schedule", detail: "Turns Ember on at sunset and restores it at sunrise.")
   private let launchRow = EmberToggleRowView(iconSymbol: "paperplane.fill", title: "Launch at login", detail: "Apply your saved preference after sign-in.")
   private let behaviorRow = EmberBehaviorRowView()
@@ -26,13 +26,15 @@ final class ControlPanelViewController: NSViewController {
   private let footerBar = EmberFooterBarView()
 
   private let scrollContent = NSStackView()
-  private var scrollView: NSScrollView?
 
   init(coordinator: DisplayCoordinator, showDiagnostics: @escaping () -> Void) {
     self.coordinator = coordinator
     self.showDiagnostics = showDiagnostics
     super.init(nibName: nil, bundle: nil)
-    preferredContentSize = NSSize(width: EmberMetrics.popoverWidth, height: 710)
+    // Fitted to content: header + hero + presets + sliders + 4 settings rows
+    // (worst case with location button) + footer actions + footer bar.
+    // Verified by snapshot; no scroll view, so this must fit everything.
+    preferredContentSize = NSSize(width: EmberMetrics.popoverWidth, height: 810)
   }
 
   @available(*, unavailable)
@@ -67,17 +69,13 @@ final class ControlPanelViewController: NSViewController {
       wash.bottomAnchor.constraint(equalTo: background.bottomAnchor),
     ])
 
-    // Header – BETA kept per request
-    headerView.powerButton.target = self
-    headerView.powerButton.action = #selector(toggleMaster)
-    headerView.powerButton.toolTip = "Apply or restore the display filter"
-    headerView.powerButton.setAccessibilityLabel("Ember display filter")
-    // Keep accessibility for power
+    // Header is static branding; the hero orb is the panel's on/off control.
     headerView.translatesAutoresizingMaskIntoConstraints = false
 
     // Hero
     heroView.translatesAutoresizingMaskIntoConstraints = false
     heroView.wantsLayer = true
+    heroView.onOrbToggle = { [weak self] in self?.toggleMaster() }
 
     // Pill
     pillControl.target = self
@@ -135,40 +133,39 @@ final class ControlPanelViewController: NSViewController {
     footerBar.translatesAutoresizingMaskIntoConstraints = false
     footerBar.setText(version: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String).map { "v\($0)" } ?? AppVersion.displayString)
 
-    // Content: real NSScrollView with pinned footer. Normal state fits without
-    // an always-visible scrollbar; larger text/localization/permission errors
-    // and the Behavior row scroll instead of compressing controls.
+    // Content: plain fitted container with the footer pinned below it — no
+    // scroll view. The whole panel must fit; copy and row heights are budgeted
+    // so even the location-permission state fits without scrolling.
     scrollContent.orientation = .vertical
     scrollContent.alignment = .leading
-    scrollContent.spacing = 14
+    scrollContent.spacing = EmberMetrics.stackSpacing
     scrollContent.translatesAutoresizingMaskIntoConstraints = false
 
-    let scroll = NSScrollView()
-    scroll.translatesAutoresizingMaskIntoConstraints = false
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = false
-    scroll.autohidesScrollers = true
-    scroll.borderType = .noBorder
-    scroll.drawsBackground = false
-    scroll.documentView = scrollContent
-    // Keep footer pinned outside the scroll region.
-    background.addSubview(scroll)
+    // Container for content with padding
+    let container = NSView()
+    container.translatesAutoresizingMaskIntoConstraints = false
+    background.addSubview(container)
+    container.addSubview(scrollContent)
     background.addSubview(footerBar)
 
     NSLayoutConstraint.activate([
-      scroll.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: EmberMetrics.contentHInset),
-      scroll.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -EmberMetrics.contentHInset),
-      scroll.topAnchor.constraint(equalTo: background.topAnchor, constant: 14),
-      scroll.bottomAnchor.constraint(equalTo: footerBar.topAnchor, constant: -12),
+      container.leadingAnchor.constraint(
+        equalTo: background.leadingAnchor, constant: EmberMetrics.contentHInset),
+      container.trailingAnchor.constraint(
+        equalTo: background.trailingAnchor, constant: -EmberMetrics.contentHInset),
+      container.topAnchor.constraint(equalTo: background.topAnchor, constant: 12),
+      container.bottomAnchor.constraint(equalTo: footerBar.topAnchor, constant: -10),
 
-      scrollContent.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+      scrollContent.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      scrollContent.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      scrollContent.topAnchor.constraint(equalTo: container.topAnchor),
+      scrollContent.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
       footerBar.leadingAnchor.constraint(equalTo: background.leadingAnchor),
       footerBar.trailingAnchor.constraint(equalTo: background.trailingAnchor),
       footerBar.bottomAnchor.constraint(equalTo: background.bottomAnchor),
       footerBar.heightAnchor.constraint(equalToConstant: EmberMetrics.footerBarHeight),
     ])
-    scrollView = scroll
 
     // Now populate stack – width constraints are safe now that scrollContent has superview
     scrollContent.addArrangedSubview(headerView)
@@ -248,23 +245,22 @@ final class ControlPanelViewController: NSViewController {
     brightnessSlider.doubleValue = settings.apparentBrightness * 100
     brightnessValue.stringValue = "\(Int((settings.apparentBrightness * 100).rounded()))%"
 
-    // Switches
-    // Use programmatic setter to avoid sending action
+    // Switches — programmatic sync never animates (7.3: avoids shimmer on
+    // unrelated renders); only user toggles animate via the control itself.
     if backlightRow.toggle.isOn != settings.backlightLockEnabled {
-      backlightRow.toggle.setOn(settings.backlightLockEnabled, animated: true)
+      backlightRow.toggle.setOn(settings.backlightLockEnabled, animated: false)
     }
     if sunScheduleRow.toggle.isOn != settings.sunScheduleEnabled {
-      sunScheduleRow.toggle.setOn(settings.sunScheduleEnabled, animated: true)
+      sunScheduleRow.toggle.setOn(settings.sunScheduleEnabled, animated: false)
     }
     if launchRow.toggle.isOn != settings.launchAtLogin {
-      launchRow.toggle.setOn(settings.launchAtLogin, animated: true)
+      launchRow.toggle.setOn(settings.launchAtLogin, animated: false)
     }
 
-    // Power button + header ON/OFF — observed truth drives the UI.
+    // Observed truth drives the UI. The hero orb is the on/off control.
     let isActive = snapshot.isObservedActive
-    headerView.powerButton.isActiveState = isActive
-    headerView.setState(isActive: isActive)
-    headerView.powerButton.toolTip = isActive ? "Restore original display" : "Apply Ember display filter"
+    let controlsEnabled = snapshot.displayAvailable && !snapshot.isBusy
+    heroView.setOrbEnabled(controlsEnabled)
 
     // Pill preset
     let preset: Int
@@ -421,7 +417,6 @@ final class ControlPanelViewController: NSViewController {
     // Additional pulsate control handled inside HeroStatusView
 
     // Controls enabled
-    let controlsEnabled = snapshot.displayAvailable && !snapshot.isBusy
     pillControl.isEnabled = controlsEnabled
     pillControl.alphaValue = controlsEnabled ? 1 : 0.45
     warmthSlider.isEnabled = controlsEnabled
@@ -435,10 +430,8 @@ final class ControlPanelViewController: NSViewController {
     sunScheduleRow.toggle.isEnabled = !snapshot.isBusy
     launchRow.toggle.isEnabled = !snapshot.isBusy
 
-    // Header power enabled (masterButton equivalent)
-    headerView.powerButton.isEnabled = controlsEnabled
-
-    // Backlight capability caption — accurate product language.
+    // Backlight capability caption — accurate product language, budgeted to
+    // two lines so the panel fits without scrolling.
     if snapshot.backlightAvailable {
       let cap: String
       if snapshot.availableDisplayCount > 1 {
@@ -450,7 +443,7 @@ final class ControlPanelViewController: NSViewController {
       }
       backlightRow.setCaption(cap, color: EmberColor.textSecondary, showButton: false)
       backlightRow.detailLabel.stringValue =
-        "Keeps a compatible built-in display at full hardware brightness while Ember dims in software. This may reduce brightness-related flicker on some displays; Ember does not measure or guarantee PWM behavior."
+        "Full hardware brightness while Ember dims in software. May reduce flicker; Ember does not measure PWM."
       backlightRow.detailLabel.textColor = EmberColor.textSecondary
     } else {
       backlightRow.detailLabel.stringValue =
@@ -508,6 +501,10 @@ final class ControlPanelViewController: NSViewController {
 
     valueLabel.font = EmberFont.sliderValue()
     valueLabel.textColor = EmberColor.ember400
+    // Fixed minimum width so value swaps ("Pure Red" ↔ "~2700 K" ↔ "62%")
+    // never shift the heading or slider row.
+    valueLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
+    if let cell = valueLabel.cell as? NSTextFieldCell { cell.alignment = .right }
 
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -515,21 +512,26 @@ final class ControlPanelViewController: NSViewController {
     heading.orientation = .horizontal
     heading.alignment = .centerY
 
-    // Icon + slider row
+    // Icon + slider row — leading inset matches the row grid (Sec 1) so the
+    // sun icons line up with the toggle-row icon column.
     let icon = NSImageView(image: NSImage(systemSymbolName: iconName, accessibilityDescription: title) ?? NSImage())
     icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
     icon.contentTintColor = EmberColor.textTertiary
     icon.translatesAutoresizingMaskIntoConstraints = false
-    icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-    icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
+    icon.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    icon.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+
+    let leadingPad = NSView()
+    leadingPad.translatesAutoresizingMaskIntoConstraints = false
+    leadingPad.widthAnchor.constraint(equalToConstant: EmberMetrics.rowLeadingInset).isActive = true
 
     slider.translatesAutoresizingMaskIntoConstraints = false
     slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
 
-    let sliderRow = NSStackView(views: [icon, slider])
+    let sliderRow = NSStackView(views: [leadingPad, icon, slider])
     sliderRow.orientation = .horizontal
     sliderRow.alignment = .centerY
-    sliderRow.spacing = 8
+    sliderRow.spacing = EmberMetrics.rowIconTextGap
     sliderRow.translatesAutoresizingMaskIntoConstraints = false
 
     let block = NSStackView(views: [heading, sliderRow])
@@ -573,11 +575,6 @@ final class ControlPanelViewController: NSViewController {
   @objc private func changeBrightness() {
     brightnessValue.stringValue = "\(Int((brightnessSlider.doubleValue).rounded()))%"
     coordinator.setApparentBrightness(brightnessSlider.doubleValue / 100)
-  }
-
-  @objc private func sliderMouseUp() {
-    // Flush final value on mouse-up (bounded debounce already coalesces).
-    coordinator.flushPendingSettings()
   }
 
   @objc private func toggleBacklightLock() {
