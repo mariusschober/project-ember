@@ -4,7 +4,8 @@ import AppKit
 final class EmberPillControl: NSView {
   private let container = NSView()
   private var buttons: [NSButton] = []
-  private var indicator = NSView()
+  private let indicator = PillIndicatorView()
+  private var indicatorConstraints: [NSLayoutConstraint] = []
   private let titles: [String]
   var onSelect: ((Int) -> Void)?
 
@@ -41,20 +42,7 @@ final class EmberPillControl: NSView {
     addSubview(container)
 
     indicator.wantsLayer = true
-    indicator.layer?.cornerRadius = 15
-    indicator.layer?.masksToBounds = true
-    indicator.layer?.backgroundColor = NSColor.clear.cgColor
-    // gradient layer for selected
-    let grad = CAGradientLayer()
-    grad.colors = [
-      NSColor(calibratedRed: 0.78, green: 0.20, blue: 0.09, alpha: 1.0).cgColor,
-      NSColor(calibratedRed: 0.62, green: 0.16, blue: 0.08, alpha: 1.0).cgColor,
-    ]
-    grad.startPoint = CGPoint(x: 0, y: 0.5)
-    grad.endPoint = CGPoint(x: 1, y: 0.5)
-    grad.name = "indicatorGrad"
-    indicator.layer?.insertSublayer(grad, at: 0)
-
+    indicator.translatesAutoresizingMaskIntoConstraints = false
     indicator.layer?.shadowColor = NSColor.black.cgColor
     indicator.layer?.shadowOpacity = 0.28
     indicator.layer?.shadowRadius = 6
@@ -116,6 +104,7 @@ final class EmberPillControl: NSView {
 
     // Need to keep stack reference for layout? recreate ivar
     self.stackView = stack
+    remakeIndicatorConstraints(animated: false)
     needsLayout = true
   }
 
@@ -123,49 +112,22 @@ final class EmberPillControl: NSView {
 
   override func layout() {
     super.layout()
-    // Ensure stack and container have laid out before measuring button frames
+    // Ensure stack and container have laid out before styling; the indicator
+    // itself is constraint-pinned (see remakeIndicatorConstraints), so no
+    // manual frame math here and no stale-frame class of bug.
     stackView?.layoutSubtreeIfNeeded()
     container.layoutSubtreeIfNeeded()
     container.layer?.cornerRadius = container.bounds.height / 2
-    // Selected background breathing room: 5-6pt outer inset is provided by the
-    // stack 3pt padding + indicator inset; add 1-2pt internal inset via frame.
-    // Position indicator
     guard selectedSegment >= 0, selectedSegment < buttons.count else {
+      // Custom warmth: hide the highlight and reset ALL labels to unselected
+      // style (no stale white/semibold).
       indicator.isHidden = true
-      // Custom warmth: reset ALL labels to unselected style (no stale white/semibold).
       for b in buttons {
         b.contentTintColor = EmberColor.textSecondary
         b.font = EmberFont.pill()
       }
       return
     }
-    indicator.isHidden = false
-    let btn = buttons[selectedSegment]
-    // Guard against zero frames during initial layout pass — defer
-    guard btn.frame.width > 0 else {
-      indicator.isHidden = true
-      DispatchQueue.main.async { [weak self] in self?.needsLayout = true }
-      return
-    }
-    let frame = container.convert(btn.frame, from: btn.superview)
-    // Breathing room: outer gap from the container edge comes from the stack
-    // inset; the indicator additionally insets from the segment frame so the
-    // highlight never hugs the label or touches the container border.
-    let target = NSRect(
-      x: frame.minX + EmberMetrics.pillIndicatorHInset,
-      y: frame.minY + EmberMetrics.pillIndicatorVInset,
-      width: frame.width - (EmberMetrics.pillIndicatorHInset * 2),
-      height: frame.height - (EmberMetrics.pillIndicatorVInset * 2))
-    guard target.width > 0, target.height > 0 else {
-      indicator.isHidden = true
-      return
-    }
-    indicator.frame = target
-    if let grad = indicator.layer?.sublayers?.first(where: { $0.name == "indicatorGrad" }) {
-      grad.frame = indicator.bounds
-      grad.cornerRadius = indicator.bounds.height / 2
-    }
-    indicator.layer?.cornerRadius = indicator.bounds.height / 2
 
     // Update button colors — Increase Contrast: keep white + semibold + indicator
     // border so selected state never relies on color alone. Hovered unselected
@@ -196,10 +158,44 @@ final class EmberPillControl: NSView {
 
   private var hoveredSegment: Int = -1
 
+  /// Pins the highlight to the selected segment button with small breathing
+  /// insets. Cross-hierarchy anchors (indicator in the container, button in
+  /// the stack) share the container as common ancestor, so the highlight
+  /// tracks the button through every layout pass — no manual frames, no
+  /// stale-frame deferrals.
+  private func remakeIndicatorConstraints(animated: Bool) {
+    NSLayoutConstraint.deactivate(indicatorConstraints)
+    indicatorConstraints.removeAll()
+    guard selectedSegment >= 0, selectedSegment < buttons.count else {
+      indicator.isHidden = true
+      return
+    }
+    indicator.isHidden = false
+    let btn = buttons[selectedSegment]
+    indicatorConstraints = [
+      indicator.leadingAnchor.constraint(
+        equalTo: btn.leadingAnchor, constant: EmberMetrics.pillIndicatorHInset),
+      indicator.trailingAnchor.constraint(
+        equalTo: btn.trailingAnchor, constant: -EmberMetrics.pillIndicatorHInset),
+      indicator.topAnchor.constraint(
+        equalTo: btn.topAnchor, constant: EmberMetrics.pillIndicatorVInset),
+      indicator.bottomAnchor.constraint(
+        equalTo: btn.bottomAnchor, constant: -EmberMetrics.pillIndicatorVInset),
+    ]
+    NSLayoutConstraint.activate(indicatorConstraints)
+    if animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+      NSAnimationContext.runAnimationGroup { _ in
+        container.layoutSubtreeIfNeeded()
+      }
+    } else {
+      container.needsLayout = true
+    }
+  }
+
   func setSelectedSegment(_ index: Int, animated: Bool) {
     guard index != selectedSegment else {
-      // Still refresh layout so custom (-1) clears stale highlight.
-      if index == -1 { needsLayout = true }
+      // Still refresh so custom (-1) clears a stale highlight.
+      if index == -1 { remakeIndicatorConstraints(animated: false); needsLayout = true }
       return
     }
     // Honor animated truthfully: suppress implicit animations when false,
@@ -211,7 +207,8 @@ final class EmberPillControl: NSView {
     }
     selectedSegment = index
     updateAccessibility(index)
-    // didSet schedules layout; do not call layout() directly (single path).
+    // Re-pin the highlight (single update path; layout follows automatically).
+    remakeIndicatorConstraints(animated: animated)
     if !shouldAnimate {
       NSAnimationContext.endGrouping()
     }
@@ -287,4 +284,34 @@ final class EmberPillControl: NSView {
     self.action = action
   }
 
+}
+
+/// Highlight bar behind the selected preset. Owns its gradient and keeps it
+/// glued to its own bounds, so no outer layout code ever sizes sublayers.
+@MainActor
+final class PillIndicatorView: NSView {
+  private let gradient = CAGradientLayer()
+
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    wantsLayer = true
+    layer?.masksToBounds = true
+    gradient.colors = [
+      NSColor(calibratedRed: 0.78, green: 0.20, blue: 0.09, alpha: 1.0).cgColor,
+      NSColor(calibratedRed: 0.62, green: 0.16, blue: 0.08, alpha: 1.0).cgColor,
+    ]
+    gradient.startPoint = CGPoint(x: 0, y: 0.5)
+    gradient.endPoint = CGPoint(x: 1, y: 0.5)
+    if let layer { layer.addSublayer(gradient) }
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError() }
+
+  override func layout() {
+    super.layout()
+    gradient.frame = bounds
+    gradient.cornerRadius = bounds.height / 2
+    layer?.cornerRadius = bounds.height / 2
+  }
 }

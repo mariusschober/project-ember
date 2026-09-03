@@ -177,12 +177,24 @@ final class EmberToggleRowView: NSView {
     iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
     iconView.contentTintColor = EmberColor.textTertiary
     iconView.translatesAutoresizingMaskIntoConstraints = false
-    iconView.widthAnchor.constraint(equalToConstant: 20).isActive = true
-    iconView.heightAnchor.constraint(equalToConstant: 20).isActive = true
     iconView.imageScaling = .scaleProportionallyDown
     if let img = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: title) {
       iconView.image = img
     }
+    // Fixed-size icon box: the image view carries internal symbol aspect
+    // constraints that fight a second required height (stretched icons), so
+    // the box owns the 20×20 geometry and the glyph letterboxes inside it.
+    let iconBox = NSView()
+    iconBox.translatesAutoresizingMaskIntoConstraints = false
+    iconBox.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    iconBox.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    iconBox.addSubview(iconView)
+    NSLayoutConstraint.activate([
+      iconView.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
+      iconView.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
+      iconView.widthAnchor.constraint(lessThanOrEqualToConstant: EmberMetrics.rowIconWidth),
+      iconView.heightAnchor.constraint(lessThanOrEqualToConstant: EmberMetrics.rowIconWidth),
+    ])
 
     titleLabel.stringValue = title
     titleLabel.font = EmberFont.rowTitle()
@@ -195,15 +207,20 @@ final class EmberToggleRowView: NSView {
     detailLabel.font = EmberFont.rowDetail()
     detailLabel.textColor = EmberColor.textSecondary
     detailLabel.maximumNumberOfLines = 2
+    detailLabel.preferredMaxLayoutWidth = EmberMetrics.rowTextWidth
     detailLabel.lineBreakMode = .byWordWrapping
-    detailLabel.setContentHuggingPriority(.defaultLow, for: .vertical)
+    // Required vertical hugging (with a fixed wrap width) gives the row a
+    // unique height and clears hasAmbiguousLayout; compression stays default
+    // so tight spaces can still squeeze gracefully.
+    detailLabel.setContentHuggingPriority(.required, for: .vertical)
 
     captionLabel.font = EmberFont.rowCaption()
     captionLabel.textColor = EmberColor.textMuted
     captionLabel.isHidden = true
     captionLabel.maximumNumberOfLines = 2
+    captionLabel.preferredMaxLayoutWidth = EmberMetrics.rowTextWidth
     captionLabel.lineBreakMode = .byWordWrapping
-    captionLabel.setContentHuggingPriority(.defaultLow, for: .vertical)
+    captionLabel.setContentHuggingPriority(.required, for: .vertical)
 
     let textStack = NSStackView(views: [titleLabel, detailLabel, captionLabel])
     textStack.orientation = .vertical
@@ -225,15 +242,15 @@ final class EmberToggleRowView: NSView {
     // and caption grow downward. Title baselines stay identical across rows.
     // All insets come from the shared EmberMetrics row grid so toggle rows,
     // the behavior row, and slider icon columns line up.
-    addSubview(iconView)
+    addSubview(iconBox)
     addSubview(textStack)
     addSubview(toggle)
     NSLayoutConstraint.activate([
-      iconView.leadingAnchor.constraint(
+      iconBox.leadingAnchor.constraint(
         equalTo: leadingAnchor, constant: EmberMetrics.rowLeadingInset),
-      iconView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
-      iconView.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
+      iconBox.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+      iconBox.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
+      iconBox.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
 
       toggle.trailingAnchor.constraint(
         equalTo: trailingAnchor, constant: -EmberMetrics.rowTrailingInset),
@@ -242,32 +259,19 @@ final class EmberToggleRowView: NSView {
       toggle.heightAnchor.constraint(equalToConstant: 26),
 
       textStack.leadingAnchor.constraint(
-        equalTo: iconView.trailingAnchor, constant: EmberMetrics.rowIconTextGap),
+        equalTo: iconBox.trailingAnchor, constant: EmberMetrics.rowIconTextGap),
       textStack.trailingAnchor.constraint(equalTo: toggle.leadingAnchor, constant: -12),
       textStack.topAnchor.constraint(
         equalTo: topAnchor, constant: EmberMetrics.rowTopPadding),
       textStack.bottomAnchor.constraint(
         lessThanOrEqualTo: bottomAnchor, constant: -EmberMetrics.rowBottomPadding),
+      // Minimum height only (required): with required label hugging the row
+      // height resolves uniquely to max(minimum, content) instead of staying
+      // ambiguous behind a non-required equal-height constraint.
       heightAnchor.constraint(greaterThanOrEqualToConstant: EmberMetrics.rowMinHeight),
     ])
-    let minHeight = heightAnchor.constraint(equalToConstant: EmberMetrics.rowMinHeight)
-    minHeight.priority = .defaultHigh
-    minHeight.isActive = true
     // Ensure textStack doesn't compress toggle
     textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-  }
-
-  override func layout() {
-    super.layout()
-    // Derive wrapping widths from the actual text width so rows share one
-    // wrap point instead of a stale fixed constant.
-    let textWidth = max(0, bounds.width - EmberMetrics.rowLeadingInset
-      - EmberMetrics.rowTrailingInset - EmberMetrics.rowIconWidth
-      - EmberMetrics.rowIconTextGap - 44 - 12)
-    if textWidth > 0 {
-      detailLabel.preferredMaxLayoutWidth = textWidth
-      captionLabel.preferredMaxLayoutWidth = textWidth
-    }
   }
 
   @available(*, unavailable)
@@ -317,6 +321,7 @@ final class EmberSettingsCard: NSView {
     layer?.borderColor = EmberColor.borderCard.cgColor
     stack.orientation = .vertical
     stack.spacing = 0
+    stack.alignment = .leading
     stack.translatesAutoresizingMaskIntoConstraints = false
     addSubview(stack)
     NSLayoutConstraint.activate([
@@ -328,37 +333,40 @@ final class EmberSettingsCard: NSView {
   }
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
+  /// Rows must fill the card width deterministically: without an explicit
+  /// width pin, rows size to intrinsic text width and stagger (icons and
+  /// titles land on different x per row). Same pattern as the outer stack.
+  private func pinFullWidth(_ view: NSView) {
+    view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+  }
   func addRow(_ row: EmberToggleRowView, showDivider: Bool = true) {
     stack.addArrangedSubview(row)
+    pinFullWidth(row)
     if showDivider {
-      let div = NSView()
-      div.wantsLayer = true
-      div.layer?.backgroundColor = EmberColor.divider.cgColor
-      div.translatesAutoresizingMaskIntoConstraints = false
-      div.heightAnchor.constraint(equalToConstant: 1).isActive = true
-      stack.addArrangedSubview(div)
+      addDivider()
     }
   }
   func addRow(_ row: EmberBehaviorRowView, showDivider: Bool = true) {
     stack.addArrangedSubview(row)
+    pinFullWidth(row)
     if showDivider {
-      let div = NSView()
-      div.wantsLayer = true
-      div.layer?.backgroundColor = EmberColor.divider.cgColor
-      div.translatesAutoresizingMaskIntoConstraints = false
-      div.heightAnchor.constraint(equalToConstant: 1).isActive = true
-      stack.addArrangedSubview(div)
+      addDivider()
     }
   }
   func addRow(_ row: NSView, showDivider: Bool = true) {
     stack.addArrangedSubview(row)
+    pinFullWidth(row)
     if showDivider {
-      let div = NSView()
-      div.wantsLayer = true
-      div.layer?.backgroundColor = EmberColor.divider.cgColor
-      div.translatesAutoresizingMaskIntoConstraints = false
-      div.heightAnchor.constraint(equalToConstant: 1).isActive = true
-      stack.addArrangedSubview(div)
+      addDivider()
     }
+  }
+  private func addDivider() {
+    let div = NSView()
+    div.wantsLayer = true
+    div.layer?.backgroundColor = EmberColor.divider.cgColor
+    div.translatesAutoresizingMaskIntoConstraints = false
+    div.heightAnchor.constraint(equalToConstant: 1).isActive = true
+    stack.addArrangedSubview(div)
+    pinFullWidth(div)
   }
 }

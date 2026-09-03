@@ -4,7 +4,11 @@ import AppKit
 final class EmberHeaderView: NSView {
   let iconView = NSImageView()
   let titleLabel = NSTextField(labelWithString: "EMBER")
-  let subtitleLabel = NSTextField(labelWithString: "Reduces short-wavelength display output for evening use.")
+  // Single-line tagline sized to the 321pt header budget (390 − 32 content
+  // − 28 icon − 9 gap). NOTE for owner review: shortened from "Reduces
+  // short-wavelength display output for evening use." — the longer string's
+  // uncapped truncating intrinsic width stretched the whole window past 390pt.
+  let subtitleLabel = NSTextField(labelWithString: "Reduces short-wavelength light for evening use.")
   let betaLabel = NSTextField(labelWithString: "BETA") // kept for compatibility, hidden
 
   override init(frame frameRect: NSRect) {
@@ -69,12 +73,14 @@ final class EmberHeaderView: NSView {
 
 @MainActor
 final class EmberFooterBarView: NSView {
-  let heartView = NSImageView()
+  // NOTE: no heart icon — the full claim sentence plus badge already fill the
+  // 390pt footer budget (366pt usable); a 14pt decoration pushed fitting to
+  // 414pt and grew the whole window.
   let prefixLabel = NSTextField(labelWithString: "Designed by\u{00A0}")
   let authorButton = NSButton(title: "Marius Schober", target: nil, action: nil)
   let suffixLabel = NSTextField(labelWithString: "\u{00A0}for circadian-aware evenings")
-  let betaBadge = NSTextField(labelWithString: "BETA")
-  let versionLabel = NSTextField(labelWithString: "v0.4.0")
+  // Single badge ("BETA · v0.4.0"): two badges cost ~73pt vs ~66pt.
+  let betaBadge = NSTextField(labelWithString: "BETA · v0.4.0")
   private static let authorURL = URL(string: "https://mariusschober.com/")!
 
   override init(frame frameRect: NSRect) {
@@ -84,16 +90,11 @@ final class EmberFooterBarView: NSView {
     layer?.borderWidth = 1
     layer?.borderColor = NSColor.white.withAlphaComponent(0.04).cgColor
 
-    heartView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-    heartView.contentTintColor = NSColor(calibratedRed: 0.68, green: 0.22, blue: 0.18, alpha: 1.0)
-    heartView.image = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: nil)
-    heartView.translatesAutoresizingMaskIntoConstraints = false
-    heartView.widthAnchor.constraint(equalToConstant: 14).isActive = true
-    heartView.heightAnchor.constraint(equalToConstant: 14).isActive = true
-
-    prefixLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+    // 9.5pt attribution text: larger sizes summed past the 366pt footer
+    // budget and grew the whole window (see subtitle note).
+    prefixLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .regular)
     prefixLabel.textColor = EmberColor.textSecondary
-    suffixLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+    suffixLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .regular)
     suffixLabel.textColor = EmberColor.textSecondary
     for label in [prefixLabel, suffixLabel] {
       label.lineBreakMode = .byTruncatingTail
@@ -110,7 +111,7 @@ final class EmberFooterBarView: NSView {
     authorButton.setAccessibilityHelp("Opens the author's website.")
     authorButton.setAccessibilityRole(.link)
 
-    betaBadge.font = NSFont.systemFont(ofSize: 9, weight: .bold)
+    betaBadge.font = NSFont.systemFont(ofSize: 8.5, weight: .bold)
     betaBadge.textColor = EmberColor.ember400
     betaBadge.alphaValue = 0.95
     betaBadge.wantsLayer = true
@@ -118,34 +119,24 @@ final class EmberFooterBarView: NSView {
     betaBadge.layer?.cornerRadius = 6
     betaBadge.layer?.masksToBounds = true
     betaBadge.translatesAutoresizingMaskIntoConstraints = false
-    versionLabel.font = NSFont.systemFont(ofSize: 9, weight: .medium)
-    versionLabel.textColor = EmberColor.textTertiary
-    versionLabel.wantsLayer = true
-    versionLabel.layer?.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1.0).cgColor
-    versionLabel.layer?.cornerRadius = 6
-    versionLabel.layer?.masksToBounds = true
 
-    let left = NSStackView(views: [heartView, prefixLabel, authorButton, suffixLabel])
+    let left = NSStackView(views: [prefixLabel, authorButton, suffixLabel])
     left.orientation = .horizontal
-    left.spacing = 0
+    left.spacing = 2
     left.alignment = .centerY
 
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-    let betaVersionStack = NSStackView(views: [betaBadge, versionLabel])
-    betaVersionStack.orientation = .horizontal
-    betaVersionStack.spacing = 6
-    betaVersionStack.alignment = .centerY
-    let container = NSStackView(views: [left, spacer, betaVersionStack])
+    let container = NSStackView(views: [left, spacer, betaBadge])
     container.orientation = .horizontal
     container.alignment = .centerY
-    container.spacing = 8
+    container.spacing = 4
     container.translatesAutoresizingMaskIntoConstraints = false
     addSubview(container)
 
     NSLayoutConstraint.activate([
-      container.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-      container.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+      container.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+      container.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
       container.topAnchor.constraint(equalTo: topAnchor),
       container.bottomAnchor.constraint(equalTo: bottomAnchor),
       heightAnchor.constraint(equalToConstant: EmberMetrics.footerBarHeight),
@@ -156,7 +147,7 @@ final class EmberFooterBarView: NSView {
   required init?(coder: NSCoder) { fatalError() }
 
   func setText(version: String = AppVersionDisplay.fallback) {
-    versionLabel.stringValue = "  \(version)  "
+    betaBadge.stringValue = " BETA · \(version) "
   }
 
   private var authorCursorPushed = false

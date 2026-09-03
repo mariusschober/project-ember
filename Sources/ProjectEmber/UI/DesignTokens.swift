@@ -85,11 +85,20 @@ enum EmberMetrics {
   // internal relief around the label so the highlight never hugs text.
   static let pillHeight: CGFloat = 42
   static let pillStackInset: CGFloat = 5
-  static let pillIndicatorHInset: CGFloat = 12
-  static let pillIndicatorVInset: CGFloat = 4
+  static let pillIndicatorHInset: CGFloat = 3
+  static let pillIndicatorVInset: CGFloat = 3
   static let sliderThumb: CGFloat = 22
   static let sliderTrackHeight: CGFloat = 4
   static let sliderEndInset: CGFloat = 14 // thumbSize/2 + 3: keeps thumbs fully visible at 0%/100%
+  // Deterministic wrapping widths. These MUST be static constants, never
+  // derived from bounds at layout time: deriving wrap widths from bounds
+  // creates a width↔wrap feedback loop (width sets wrap, wrap sets intrinsic
+  // height, height re-resolves width) that never converges — rows stagger,
+  // icons stretch, and the window grows past 390pt.
+  // Toggle-row text = 390 − 32 (content) − 14 − 20 − 10 − 12 − 44 − 14.
+  static let rowTextWidth: CGFloat = 244
+  // Hero text = 390 − 32 (content) − 16 (leading) − 12 (gap) − 124 (orb) − 8.
+  static let heroTextWidth: CGFloat = 198
   static let stackSpacing: CGFloat = 10
   static let heroHeight: CGFloat = 128
   static let headerHeight: CGFloat = 40

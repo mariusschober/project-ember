@@ -5,6 +5,9 @@ final class EmberOrbView: NSView {
   private let orbLayer = CALayer()
   private let glowLayer = CALayer()
   private let highlightLayer = CALayer()
+  /// Subtle power glyph centered on the orb: marks it as the on/off control.
+  /// Decorative sibling of orbLayer (never pulses, never intercepts clicks).
+  private let glyphView = NSImageView()
   private var waveLayers: [CAShapeLayer] = []
   private var waveBaseOpacity: [Float] = []
   private var isActive = false
@@ -82,6 +85,23 @@ final class EmberOrbView: NSView {
       // stash gradient
       orbLayer.setValue(gradient, forKey: "gradient")
     }
+
+    // Power glyph overlay: sibling above the orb so the pulse scale never
+    // moves the affordance. Hit-test-transparent; the orb view owns clicks
+    // and the accessibility label.
+    glyphView.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
+    glyphView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+    glyphView.contentTintColor = NSColor.white.withAlphaComponent(0.25)
+    glyphView.imageScaling = .scaleProportionallyDown
+    glyphView.setAccessibilityElement(false)
+    glyphView.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(glyphView)
+    NSLayoutConstraint.activate([
+      glyphView.widthAnchor.constraint(equalToConstant: 26),
+      glyphView.heightAnchor.constraint(equalToConstant: 26),
+      glyphView.centerXAnchor.constraint(equalTo: centerXAnchor),
+      glyphView.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 8),
+    ])
     // Ensure initial visual matches inactive
     glowLayer.backgroundColor = NSColor(calibratedWhite: 0.35, alpha: 0.10).cgColor
     glowLayer.opacity = 0.22
@@ -219,6 +239,12 @@ final class EmberOrbView: NSView {
       ).cgColor
     }
     highlightLayer.opacity = isHovered ? 1 : 0.8
+    // Power glyph: subtle at idle, prominent on hover/press, dimmed when the
+    // control is disabled. Slightly stronger when on so it reads on ember.
+    let glyphIdle: Float = isActive ? 0.30 : 0.25
+    let glyphHover: Float = isActive ? 0.60 : 0.55
+    glyphView.alphaValue =
+      !isControlEnabled ? 0.15 : isPressed ? 0.75 : (isHovered ? CGFloat(glyphHover) : CGFloat(glyphIdle))
     for (i, w) in waveLayers.enumerated() {
       let baseAlpha: Float
       if isActive {
@@ -508,7 +534,9 @@ final class HeroStatusView: NSView {
     detailLabel.textColor = EmberColor.textSecondary
     detailLabel.maximumNumberOfLines = 2
     detailLabel.lineBreakMode = .byWordWrapping
-    // preferredMaxLayoutWidth set dynamically in layout() to actual textStack width
+    // Static wrap width (see EmberMetrics): deriving it from bounds at layout
+    // time feeds the width↔wrap feedback loop that grows the window.
+    detailLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
 
     metaIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
     metaIcon.contentTintColor = EmberColor.textTertiary
@@ -516,11 +544,13 @@ final class HeroStatusView: NSView {
     metaLabel.font = EmberFont.rowCaption()
     metaLabel.textColor = EmberColor.textSecondary
     metaLabel.lineBreakMode = .byTruncatingTail
+    metaLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
 
     sunsetLabel.font = EmberFont.rowCaption()
     sunsetLabel.textColor = EmberColor.textMuted
     sunsetLabel.lineBreakMode = .byTruncatingTail
     sunsetLabel.maximumNumberOfLines = 1
+    sunsetLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
     // sunset time part will be recolored via attributed string in render
 
     // Layout
@@ -569,13 +599,6 @@ final class HeroStatusView: NSView {
   override func layout() {
     super.layout()
     bgLayer.frame = bounds
-    // Hero: 358 = 390 - 16*2 inset; text leading 16, orb 124, gap 12, trailing 8 => 198 available
-    let available = max(0, bounds.width - 16 - 8 - 12 - 124)
-    if available > 0 {
-      detailLabel.preferredMaxLayoutWidth = available
-      metaLabel.preferredMaxLayoutWidth = available
-      sunsetLabel.preferredMaxLayoutWidth = available
-    }
   }
 
   func setOrbEnabled(_ enabled: Bool) {

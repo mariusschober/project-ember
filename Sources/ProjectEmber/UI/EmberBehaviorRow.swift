@@ -16,17 +16,31 @@ final class EmberBehaviorRowView: NSView {
     iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
     iconView.contentTintColor = EmberColor.textTertiary
     iconView.translatesAutoresizingMaskIntoConstraints = false
-    iconView.widthAnchor.constraint(equalToConstant: 20).isActive = true
-    iconView.heightAnchor.constraint(equalToConstant: 20).isActive = true
     iconView.imageScaling = .scaleProportionallyDown
     iconView.image = NSImage(systemSymbolName: "cursorarrow.click", accessibilityDescription: "Menu bar click")
+    // Fixed-size box (see EmberToggleRowView): the glyph letterboxes inside
+    // instead of fighting aspect constraints.
+    let iconBox = NSView()
+    iconBox.translatesAutoresizingMaskIntoConstraints = false
+    iconBox.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    iconBox.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    iconBox.addSubview(iconView)
+    NSLayoutConstraint.activate([
+      iconView.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
+      iconView.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
+      iconView.widthAnchor.constraint(lessThanOrEqualToConstant: EmberMetrics.rowIconWidth),
+      iconView.heightAnchor.constraint(lessThanOrEqualToConstant: EmberMetrics.rowIconWidth),
+    ])
 
     titleLabel.font = EmberFont.rowTitle()
     titleLabel.textColor = EmberColor.textPrimary
+    titleLabel.setContentHuggingPriority(.required, for: .vertical)
     detailLabel.font = EmberFont.rowDetail()
     detailLabel.textColor = EmberColor.textSecondary
     detailLabel.maximumNumberOfLines = 2
+    detailLabel.preferredMaxLayoutWidth = EmberMetrics.rowTextWidth + 40
     detailLabel.lineBreakMode = .byWordWrapping
+    detailLabel.setContentHuggingPriority(.required, for: .vertical)
 
     openButton.font = .systemFont(ofSize: 11, weight: .regular)
     openButton.target = self
@@ -53,12 +67,12 @@ final class EmberBehaviorRowView: NSView {
     vertical.alignment = .leading
     vertical.translatesAutoresizingMaskIntoConstraints = false
 
-    addSubview(iconView)
+    addSubview(iconBox)
     addSubview(vertical)
     NSLayoutConstraint.activate([
-      iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-      iconView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-      vertical.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+      iconBox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: EmberMetrics.rowLeadingInset),
+      iconBox.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+      vertical.leadingAnchor.constraint(equalTo: iconBox.trailingAnchor, constant: EmberMetrics.rowIconTextGap),
       vertical.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
       vertical.topAnchor.constraint(equalTo: topAnchor, constant: 12),
       vertical.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
