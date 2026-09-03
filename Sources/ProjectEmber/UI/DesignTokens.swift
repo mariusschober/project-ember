@@ -23,11 +23,14 @@ enum EmberColor {
   static let surfaceHeroActiveFrom = NSColor(calibratedRed: 0.36, green: 0.18, blue: 0.14, alpha: 1.0)
   static let surfaceHeroActiveTo = NSColor(calibratedRed: 0.24, green: 0.13, blue: 0.11, alpha: 1.0)
 
-  // Text
-  static let textPrimary = NSColor(calibratedRed: 0.95, green: 0.93, blue: 0.92, alpha: 1.0)
-  static let textSecondary = NSColor(calibratedRed: 0.71, green: 0.68, blue: 0.66, alpha: 1.0) // #B5ADA9
-  static let textTertiary = NSColor(calibratedRed: 0.52, green: 0.50, blue: 0.50, alpha: 1.0)
-  static let textMuted = NSColor(calibratedRed: 0.43, green: 0.41, blue: 0.40, alpha: 1.0)
+  // Text — all below 18pt meet ≥4.5:1 on card surface in composited state.
+  // Hierarchy retained with brighter muted/tertiary than 0.3.0.
+  static let textPrimary = NSColor(calibratedRed: 0.96, green: 0.94, blue: 0.93, alpha: 1.0)
+  static let textSecondary = NSColor(calibratedRed: 0.82, green: 0.79, blue: 0.77, alpha: 1.0)
+  static let textTertiary = NSColor(calibratedRed: 0.70, green: 0.68, blue: 0.67, alpha: 1.0)
+  static let textMuted = NSColor(calibratedRed: 0.62, green: 0.60, blue: 0.59, alpha: 1.0)
+  // Opaque fallback when Reduce Transparency is enabled (replaces HUD/vibrancy).
+  static let surfaceOpaque = NSColor(calibratedRed: 0.13, green: 0.12, blue: 0.12, alpha: 1.0)
 
   // Borders / dividers
   static let borderSubtle = NSColor(calibratedWhite: 1.0, alpha: 0.07)
@@ -68,11 +71,37 @@ enum EmberMetrics {
   static let contentHInset: CGFloat = 16
   static let cardCorner: CGFloat = 14
   static let pillCorner: CGFloat = 18
-  static let rowHeight: CGFloat = 64
+  static let rowHeight: CGFloat = 56
+  // Shared row grid: every row type (toggle, behavior, slider icon) aligns
+  // icons and trailing controls to these insets so columns line up.
+  static let rowLeadingInset: CGFloat = 14
+  static let rowTrailingInset: CGFloat = 14
+  static let rowIconWidth: CGFloat = 20
+  static let rowIconTextGap: CGFloat = 10
+  static let rowMinHeight: CGFloat = 56
+  static let rowTopPadding: CGFloat = 10
+  static let rowBottomPadding: CGFloat = 10
+  // Pill preset geometry: outer breathing room from the container edge plus
+  // internal relief around the label so the highlight never hugs text.
+  static let pillHeight: CGFloat = 42
+  static let pillStackInset: CGFloat = 5
+  static let pillIndicatorHInset: CGFloat = 3
+  static let pillIndicatorVInset: CGFloat = 3
   static let sliderThumb: CGFloat = 22
   static let sliderTrackHeight: CGFloat = 4
-  static let heroHeight: CGFloat = 148
-  static let headerHeight: CGFloat = 44
+  static let sliderEndInset: CGFloat = 14 // thumbSize/2 + 3: keeps thumbs fully visible at 0%/100%
+  // Deterministic wrapping widths. These MUST be static constants, never
+  // derived from bounds at layout time: deriving wrap widths from bounds
+  // creates a width↔wrap feedback loop (width sets wrap, wrap sets intrinsic
+  // height, height re-resolves width) that never converges — rows stagger,
+  // icons stretch, and the window grows past 390pt.
+  // Toggle-row text = 390 − 32 (content) − 14 − 20 − 10 − 12 − 44 − 14.
+  static let rowTextWidth: CGFloat = 244
+  // Hero text = 390 − 32 (content) − 16 (leading) − 12 (gap) − 124 (orb) − 8.
+  static let heroTextWidth: CGFloat = 198
+  static let stackSpacing: CGFloat = 10
+  static let heroHeight: CGFloat = 128
+  static let headerHeight: CGFloat = 40
   static let footerBarHeight: CGFloat = 36
 }
 

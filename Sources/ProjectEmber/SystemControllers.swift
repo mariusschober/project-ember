@@ -92,6 +92,33 @@ final class GammaDisplayController {
     try write(baseline.gammaTable, to: target)
   }
 
+  /// Verified restore: writes the saved table and reads back within tolerance.
+  /// Recovery entries are removed only after this succeeds.
+  func restoreVerified(_ baseline: DisplayBaseline, tolerance: Float = 0.004) throws {
+    let target = try resolve(baseline: baseline)
+    try write(baseline.gammaTable, to: target)
+    let readback = try readTable(displayID: target.displayID, capacity: target.gammaCapacity)
+    let delta = readback.maximumAbsoluteDifference(from: baseline.gammaTable)
+    guard delta < tolerance else { throw EmberError.gammaVerificationFailed }
+  }
+
+  func verifyTransform(settings: EmberSettings, baseline: DisplayBaseline, tolerance: Float = 0.004) throws -> GammaTable {
+    let gains = ColorCurve.gains(forWarmth: settings.warmth)
+    let expected = baseline.gammaTable.applying(
+      gains: gains,
+      apparentBrightness: settings.apparentBrightness
+    )
+    let target = try resolve(baseline: baseline)
+    let current = try readTable(displayID: target.displayID, capacity: target.gammaCapacity)
+    let delta = current.maximumAbsoluteDifference(from: expected)
+    guard delta < tolerance else { throw EmberError.gammaVerificationFailed }
+    return current
+  }
+
+  func isTransformInstalled(settings: EmberSettings, baseline: DisplayBaseline, tolerance: Float = 0.004) -> Bool {
+    (try? verifyTransform(settings: settings, baseline: baseline, tolerance: tolerance)) != nil
+  }
+
   func forceColorSyncRestore() {
     CGDisplayRestoreColorSyncSettings()
   }
@@ -108,12 +135,40 @@ final class GammaDisplayController {
   func target(matching identity: DisplayIdentity) throws -> DisplayTarget? {
     let targets = try displayTargets()
     if let legacyID = identity.legacyDisplayID {
+      // Legacy v1 records are built-in-only. Never resolve onto an unrelated
+      // external display whose transient display ID was reused.
       if let exact = targets.first(where: { $0.displayID == legacyID }) {
-        return exact
+        // Exact ID hit: accept only if it is still the built-in panel or the
+        // identity also matches; otherwise refuse an unsafe match.
+        if exact.identity.isBuiltIn || identity.matches(exact.identity) { return exact }
+        return targets.first(where: { $0.identity.isBuiltIn })
       }
+      // No exact hit: prefer the current built-in display for legacy built-in
+      // records; refuse if there is no built-in target.
+      guard identity.isBuiltIn else { return nil }
       return targets.first(where: { $0.identity.isBuiltIn })
     }
-    return targets.first(where: { identity.matches($0.identity) })
+    let candidates = targets.filter { identity.matches($0.identity) }
+    // Ambiguity means no mutation: identical zero-serial displays must not
+    // resolve to the first match.
+    guard candidates.count <= 1 else { return nil }
+    return candidates.first
+  }
+
+  /// Returns ambiguity keys for the current enumeration (identity key → count>1).
+  func ambiguousIdentityKeys() throws -> Set<String> {
+    let targets = try displayTargets()
+    var counts: [String: Int] = [:]
+    for t in targets {
+      let key: String
+      if let uuid = t.identity.uuid, !uuid.isEmpty { key = "uuid:\(uuid.lowercased())" }
+      else {
+        key =
+          "hw:\(t.identity.vendorNumber):\(t.identity.modelNumber):\(t.identity.serialNumber):\(t.identity.unitNumber):\(t.identity.isBuiltIn)"
+      }
+      counts[key, default: 0] += 1
+    }
+    return Set(counts.filter { $0.value > 1 }.map(\.key))
   }
 
   private func resolve(baseline: DisplayBaseline) throws -> DisplayTarget {
@@ -144,7 +199,7 @@ final class GammaDisplayController {
     )
   }
 
-  private func readTable(displayID: CGDirectDisplayID, capacity: UInt32) throws -> GammaTable {
+  func readTable(displayID: CGDirectDisplayID, capacity: UInt32) throws -> GammaTable {
     guard capacity >= 2 else { throw EmberError.invalidGammaTable }
     var red = [CGGammaValue](repeating: 0, count: Int(capacity))
     var green = [CGGammaValue](repeating: 0, count: Int(capacity))
@@ -254,6 +309,11 @@ final class DisplayServicesBacklightController {
   }
 
   func capability(for display: CGDirectDisplayID) -> Capability {
+    // Built-in-only: never report capability for an external display, even if
+    // the private symbols happen to answer.
+    guard CGDisplayIsBuiltin(display) != 0 else {
+      return Capability(brightnessControl: false, ambientLightControl: false)
+    }
     var brightness: Float = 0
     let brightnessReady = getBrightness?(display, &brightness) == 0 && setBrightness != nil
     var ambient = false
@@ -264,6 +324,9 @@ final class DisplayServicesBacklightController {
   }
 
   func captureBaseline(for display: CGDirectDisplayID) throws -> HardwareBaseline {
+    // Backlight Lock is built-in-only and reversible: never engage the private
+    // DisplayServices path on an external display, even if symbols resolve.
+    guard CGDisplayIsBuiltin(display) != 0 else { throw EmberError.backlightUnavailable }
     guard let getBrightness else { throw EmberError.backlightUnavailable }
     var brightness: Float = 0
     let brightnessResult = getBrightness(display, &brightness)
@@ -286,15 +349,31 @@ final class DisplayServicesBacklightController {
   }
 
   func engage(on display: CGDirectDisplayID) throws {
+    // Built-in-only gate: refuse external displays outright.
+    guard CGDisplayIsBuiltin(display) != 0 else { throw EmberError.backlightUnavailable }
     guard let setBrightness, let getBrightness else { throw EmberError.backlightUnavailable }
 
-    if let setAmbientLightCompensation {
-      let ambientResult = setAmbientLightCompensation(display, false)
-      guard ambientResult == 0 else {
-        throw EmberError.ambientLightWriteFailed(ambientResult)
+    // Never change what cannot be restored: only disable automatic brightness
+    // when its current value was read successfully and captured by the caller.
+    // Here we read first; if the getter fails we leave it untouched and only
+    // manage brightness (reduced capability, not failure).
+    if let getAmbient = getAmbientLightCompensation,
+      let setAmbient = setAmbientLightCompensation
+    {
+      var ambient = false
+      if getAmbient(display, &ambient) == 0, ambient {
+        let ambientResult = setAmbient(display, false)
+        guard ambientResult == 0 else {
+          throw EmberError.ambientLightWriteFailed(ambientResult)
+        }
       }
     }
 
+    // Read before writing: only write when below threshold.
+    var current: Float = 0
+    if getBrightness(display, &current) == 0, current >= 0.97 {
+      return
+    }
     let writeResult = setBrightness(display, 1)
     guard writeResult == 0 else {
       throw EmberError.backlightWriteFailed(writeResult)
@@ -306,17 +385,57 @@ final class DisplayServicesBacklightController {
     guard verified >= 0.97 else { throw EmberError.backlightWriteFailed(1) }
   }
 
+  /// Read-only drift check for the guard: returns true when a corrective write is needed.
+  func needsEngagement(on display: CGDirectDisplayID) -> Bool {
+    guard CGDisplayIsBuiltin(display) != 0, let getBrightness else { return false }
+    var current: Float = 0
+    guard getBrightness(display, &current) == 0 else { return false }
+    if current < 0.97 { return true }
+    if let getAmbient = getAmbientLightCompensation {
+      var ambient = false
+      if getAmbient(display, &ambient) == 0, ambient { return true }
+    }
+    return false
+  }
+
+  func readBrightness(_ display: CGDirectDisplayID) throws -> Float {
+    guard CGDisplayIsBuiltin(display) != 0, let getBrightness else {
+      throw EmberError.backlightUnavailable
+    }
+    var value: Float = 0
+    let result = getBrightness(display, &value)
+    guard result == 0 else { throw EmberError.backlightReadFailed(result) }
+    return value
+  }
+
   func restore(_ baseline: HardwareBaseline, on display: CGDirectDisplayID) throws {
+    guard CGDisplayIsBuiltin(display) != 0 else { throw EmberError.backlightUnavailable }
     if let brightness = baseline.brightness {
-      guard let setBrightness else { throw EmberError.backlightUnavailable }
+      guard let setBrightness, let getBrightness else { throw EmberError.backlightUnavailable }
       let result = setBrightness(display, min(max(brightness, 0), 1))
       guard result == 0 else { throw EmberError.backlightWriteFailed(result) }
+      // Verify hardware restoration whenever a value was captured.
+      var readback: Float = 0
+      guard getBrightness(display, &readback) == 0 else {
+        throw EmberError.backlightReadFailed(-1)
+      }
+      guard abs(readback - min(max(brightness, 0), 1)) < 0.05 else {
+        throw EmberError.backlightWriteFailed(2)
+      }
     }
 
     if let ambient = baseline.ambientLightCompensationEnabled {
-      guard let setAmbientLightCompensation else { throw EmberError.backlightUnavailable }
+      guard let setAmbientLightCompensation, let getAmbientLightCompensation else {
+        throw EmberError.backlightUnavailable
+      }
       let result = setAmbientLightCompensation(display, ambient)
       guard result == 0 else { throw EmberError.ambientLightWriteFailed(result) }
+      var readback = false
+      guard getAmbientLightCompensation(display, &readback) == 0,
+        readback == ambient
+      else {
+        throw EmberError.ambientLightWriteFailed(2)
+      }
     }
   }
 

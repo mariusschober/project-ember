@@ -1,80 +1,80 @@
-# Verification plan
+# Verification plan (0.4.0)
 
-## Deterministic core checks
+## Deterministic tests (`swift test`, no hardware mutation)
 
-- Exact neutral pass-through, clamping, warmth monotonicity, and Pure Red
-- Gamma/brightness composition, resampling, and 100 zero-drift restore cycles
-- Journal-before-apply and restore-before-clear state ordering
-- UUID, serial, and zero-serial/unit display-identity matching
-- Prevention of mismatched physical-display identity resolution
-- Backward-compatible settings decoding and manual-override expiry
-- Schema-v2 two-display journal round-trip and schema-v1 migration
-- Equatorial sunrise/sunset, day/night state, and next-event ordering
-- Local-time-zone and daylight-saving solar conversion
-- Polar day and polar night without fabricated events
+`EmberCoreTests` (36 tests, Swift Testing) plus `EmberCoreChecks` smoke checks:
+
+- Topology: zero restores to survivor on unplug, disconnect retains entry,
+  journal-then-apply for new displays, pending uses saved baseline, duplicate
+  coalescing, transient-ID tolerance, stale-generation rejection, ambiguous
+  no-mutation, activation/restore convergence, OS-reset delta detection,
+  3-in-60s degraded threshold.
+- Recovery: corrupt≠absent + quarantine, empty retained, future-schema
+  rejection, v1 migration, mismatch retention, failed-rollback retention,
+  offline pending, legacy built-in never resolves to external.
+- Backlight: external never candidate, no write when correct, drift signals
+  bounded write.
+- State/presentation: failed≠active, pending calm, degraded surfaced,
+  degraded→sleep→suspended, counts, exhaustive transitions.
+- Settings/menu: 0.3.0 decodes to openControls, primary routing, right-click
+  always opens, busy coalescing.
+- Solar/UI: custom clears preset, stale rejected, DST/polar correctness.
+- Core checks: neutral/Kelvin/Pure Red, gamma composition/resample/zero-drift,
+  journal-before-apply + restore-before-clear ordering, identity matching,
+  settings migration/override expiry, journal round-trip, solar equinox/polar/
+  time-zone/DST.
 
 ## Read-only system probe
 
-`ProjectEmber --system-probe` must enumerate each active, de-duplicated display
-and report ID, ColorSync UUID, built-in flag, gamma capacity/readability, and
-hardware capability without writing anything.
+`ProjectEmber --system-probe` enumerates active de-duplicated displays: ID,
+UUID, built-in, gamma capacity/readability, hardware capability. No writes.
 
-Expected on the current setup:
+## Reversible system checks (explicit test Mac only, never unattended CI)
 
-- two online and gamma-compatible displays;
-- 1024 readable samples on both;
-- Backlight Lock and automatic-brightness control on the built-in panel;
-- no DisplayServices backlight capability on the Dell HDMI display.
+`--system-self-test`, `--lifecycle-self-test`,
+`--prepare-crash-recovery-test` + `--recover-only` as in prior releases.
+CI runs only fakes.
 
-## Reversible system checks
+Executed 2026-09-03 (MacBook Pro M1 Pro, macOS 26.6.2, built-in Liquid Retina
+XDR + Dell S2419H): probe pass (2/2 compatible, 1024 samples, backlight on
+built-in only); system self-test pass (apply/restore, Pure Red, Backlight
+Lock, auto-brightness restore, journal cleared); lifecycle pass (live
+updates, guard, reconfig, sleep/wake/termination); crash prepare + recover
+pass (startup recovery verified, journal cleared).
 
-`ProjectEmber --system-self-test` must:
+## Manual hardware acceptance matrix (required for 1.0, not claimed for 0.4.0)
 
-1. capture every compatible display and optional hardware state;
-2. atomically journal all entries;
-3. apply and read back a mild transform on every display;
-4. apply and read back Pure Red on every display;
-5. verify the built-in backlight path when available;
-6. restore and read back every exact baseline;
-7. restore hardware and automatic-brightness state;
-8. clear the journal only after successful restoration.
+Record Mac model, macOS version, connection type, display make/model,
+HDR/True Tone/Night Shift state, and result for each:
 
-`--lifecycle-self-test` covers live updates, the one-second hardware guard,
-display reconfiguration, sleep restoration, wake recapture, and termination.
-`--prepare-crash-recovery-test` followed immediately by `--recover-only` proves
-schema-v2 startup recovery across both displays.
+1. Built-in only: on/off, presets, custom warmth, software brightness,
+   Backlight Lock, sleep/wake, quit/relaunch, crash recovery.
+2. Built-in + HDMI external: 20 unplug/replug cycles while active.
+3. Built-in + USB-C/DisplayPort external: 20 unplug/replug or power cycles.
+4. Disconnect external while dragging a slider.
+5. Connect/disconnect during activation, restoration, wake, solar transition.
+6. Reconnect a display with a pending baseline.
+7. Resolution/refresh/rotation/HDR/mirror/clamshell/display-power changes.
+8. True Tone/Night Shift/auto-brightness/brightness-key interactions.
+9. Quit/force-kill with one display disconnected, reconnect, verify pending restore.
+10. Right/secondary click and both primary-click modes.
+11. VoiceOver, Full Keyboard Access, Increase Contrast, Reduce Transparency,
+    Reduce Motion, Differentiate Without Color.
+12. Eight-hour idle with popover closed; verify no orb loop and low wakeups.
 
-## Manual matrix
-
-All checks begin with no recovery journal and no other Ember process:
-
-- Neutral, Evening, intermediate warmth, and Pure Red on MacBook plus Dell
-- Apparent brightness at 100%, 50%, and 10% on both displays
-- Partial behavior with an unsupported or virtual display
-- External connect, disconnect, reconnect, mirroring, and clamshell operation
-- Pending recovery while a journaled display is absent, then exact reconnect
-- Backlight keys, Backlight Lock disable, and automatic-brightness restoration
-- Menu-bar quit, system sleep/wake, crash relaunch, and manual reset
-- Sun schedule permission grant, denial, revocation, and Settings deep link
-- Immediate daytime/nighttime reconciliation and manual override expiry
-- Clock, date, time-zone, DST, wake-after-boundary, and 24-hour location refresh
-- Keyboard traversal, VoiceOver names, and one-view panel layout
-- Built-in Retina SDR and HDR modes
-- Screenshots contain untinted source colors
-- No location prompt before the Sun switch is enabled
-- No continuous location indicator and no outbound network connection
+Pass conditions: no Ember-initiated restore of unchanged built-in on peer
+changes; no baseline deleted before verified restoration; post-cycle intended
+displays stay verified ≥10 min; OS overrides detected (never falsely active);
+repeated conflicts become bounded attention; off restores exactly with pending
+retained; clicks behave per setting; Sun row alignment stable; custom values
+leave no stale highlight; artifacts signed/notarized/stapled with checksums.
 
 ## Release checks
 
-- 55 deterministic core checks pass
-- read-only probe reports both current displays
-- reversible system, lifecycle, and crash-recovery checks pass
-- arm64 Mach-O with minimum deployment target macOS 14
-- version 0.2.0 Info.plist and valid location purpose string
-- valid privacy manifest with no collected-data or tracking declaration
-- ad-hoc code signature verifies
-- DMG mounts and contains the app plus Applications shortcut
-- fresh first launch leaves both the filter and Sun schedule off
-
-Developer ID signature, hardened runtime, and notarization remain blocked until
-an Apple Developer Program identity is available.
+- `swift test` and `EmberCoreChecks` pass
+- Read-only probe reports current displays
+- arm64 Mach-O, macOS 14 minimum, Info.plist 0.4.0 + copyright
+- Privacy manifest valid, no collected/tracking data
+- Local ad-hoc signature verifies; production path signs/notarizes/staples
+- DMG mounts with app + Applications shortcut; fresh launch leaves filter and
+  Sun schedule off

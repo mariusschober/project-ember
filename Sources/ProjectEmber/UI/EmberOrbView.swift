@@ -5,9 +5,23 @@ final class EmberOrbView: NSView {
   private let orbLayer = CALayer()
   private let glowLayer = CALayer()
   private let highlightLayer = CALayer()
+  /// Subtle power glyph centered on the orb: marks it as the on/off control.
+  /// Decorative sibling of orbLayer (never pulses, never intercepts clicks).
+  private let glyphView = NSImageView()
   private var waveLayers: [CAShapeLayer] = []
+  private var waveBaseOpacity: [Float] = []
   private var isActive = false
   private var pulsing = false
+  // Button state: the hero orb is the panel's on/off control. Hover previews
+  // the toggle result (capped partial mix, never the full opposite state).
+  private var isHovered = false
+  private var isPressed = false
+  private var cursorPushed = false
+  private var trackingArea: NSTrackingArea?
+  /// Capped hover-preview mix toward the opposite state (0…1).
+  private let hoverMix: CGFloat = 0.4
+  var isControlEnabled = true
+  var onToggle: (() -> Void)?
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -45,9 +59,9 @@ final class EmberOrbView: NSView {
     orbLayer.shadowRadius = 8
     orbLayer.shadowOffset = CGSize(width: 0, height: 6)
 
-    // Inner highlight
-    highlightLayer.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
-    highlightLayer.cornerRadius = 18
+    // Inner specular highlight: a subtle crescent bound to the orb diameter
+    // (never a free-floating capsule).
+    highlightLayer.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
     highlightLayer.masksToBounds = true
 
     // Waves at bottom - three gentle sine-like curves (inactive grey)
@@ -57,7 +71,9 @@ final class EmberOrbView: NSView {
       wave.strokeColor = NSColor(calibratedWhite: 0.45, alpha: 0.06).cgColor
       wave.lineWidth = 0.9
       wave.lineCap = .round
-      wave.opacity = 0.7 - Float(i) * 0.15
+      let base = Float(0.7 - Double(i) * 0.15)
+      wave.opacity = base
+      waveBaseOpacity.append(base)
       waveLayers.append(wave)
     }
 
@@ -69,10 +85,30 @@ final class EmberOrbView: NSView {
       // stash gradient
       orbLayer.setValue(gradient, forKey: "gradient")
     }
+
+    // Power glyph overlay: sibling above the orb so the pulse scale never
+    // moves the affordance. Hit-test-transparent; the orb view owns clicks
+    // and the accessibility label.
+    glyphView.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
+    glyphView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+    glyphView.contentTintColor = NSColor.white.withAlphaComponent(0.25)
+    glyphView.imageScaling = .scaleProportionallyDown
+    glyphView.setAccessibilityElement(false)
+    glyphView.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(glyphView)
+    NSLayoutConstraint.activate([
+      glyphView.widthAnchor.constraint(equalToConstant: 26),
+      glyphView.heightAnchor.constraint(equalToConstant: 26),
+      glyphView.centerXAnchor.constraint(equalTo: centerXAnchor),
+      glyphView.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 8),
+    ])
     // Ensure initial visual matches inactive
     glowLayer.backgroundColor = NSColor(calibratedWhite: 0.35, alpha: 0.10).cgColor
     glowLayer.opacity = 0.22
     orbLayer.opacity = 0.85
+    setAccessibilityRole(.button)
+    setAccessibilityLabel("Ember display filter")
+    updateAccessibilityValue()
   }
 
   @available(*, unavailable)
@@ -102,12 +138,12 @@ final class EmberOrbView: NSView {
       gradient.frame = orbLayer.bounds
     }
     highlightLayer.frame = NSRect(
-      x: orbRect.minX + 14,
-      y: orbRect.maxY - 28,
-      width: 28,
-      height: 18
+      x: orbRect.minX + orbSize * 0.22,
+      y: orbRect.maxY - orbSize * 0.34,
+      width: orbSize * 0.36,
+      height: orbSize * 0.15
     )
-    highlightLayer.cornerRadius = 9
+    highlightLayer.cornerRadius = highlightLayer.frame.height / 2
 
     // waves
     let waveY = orbRect.minY - 6
@@ -134,40 +170,105 @@ final class EmberOrbView: NSView {
     }
   }
 
+  // MARK: - Appearance (single path: base state + capped hover preview)
+
+  private static let greyStops: [NSColor] = [
+    NSColor(calibratedWhite: 0.52, alpha: 1.0),
+    NSColor(calibratedWhite: 0.42, alpha: 1.0),
+    NSColor(calibratedWhite: 0.32, alpha: 1.0),
+  ]
+  private static let emberStops: [NSColor] = [
+    NSColor(calibratedRed: 1.0, green: 0.38, blue: 0.22, alpha: 1.0),
+    NSColor(calibratedRed: 1.0, green: 0.22, blue: 0.12, alpha: 1.0),
+    NSColor(calibratedRed: 0.78, green: 0.14, blue: 0.09, alpha: 1.0),
+  ]
+
+  private static func mix(_ from: NSColor, _ to: NSColor, t: CGFloat) -> NSColor {
+    let a = from.usingColorSpace(.sRGB) ?? from
+    let b = to.usingColorSpace(.sRGB) ?? to
+    var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+    var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+    a.getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+    b.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+    return NSColor(
+      calibratedRed: ar + ((br - ar) * t),
+      green: ag + ((bg - ag) * t),
+      blue: ab + ((bb - ab) * t),
+      alpha: aa + ((ba - aa) * t))
+  }
+
   func setActive(_ active: Bool, animated: Bool) {
     // Always update visual, even if isActive already equals active — ensures initial off state is grey not orange
     isActive = active
     needsLayout = true
+    applyAppearance(animated: animated)
+    updateAccessibilityValue()
+    toolTip = active ? "Restore original display" : "Apply Ember display filter"
+  }
 
-    if active {
-      glowLayer.opacity = 1
-      orbLayer.opacity = 1
-      glowLayer.backgroundColor = NSColor(calibratedRed: 1.0, green: 0.24, blue: 0.13, alpha: 0.28).cgColor
-      if let grad = orbLayer.value(forKey: "gradient") as? CAGradientLayer {
-        grad.colors = [
-          NSColor(calibratedRed: 1.0, green: 0.38, blue: 0.22, alpha: 1.0).cgColor,
-          NSColor(calibratedRed: 1.0, green: 0.22, blue: 0.12, alpha: 1.0).cgColor,
-          NSColor(calibratedRed: 0.78, green: 0.14, blue: 0.09, alpha: 1.0).cgColor,
-        ]
+  /// Recomputes gradient stops, glow, and waves from (isActive, isHovered).
+  /// Priority: disabled > hover-preview > pulse. Hover mixes only partway
+  /// (hoverMix) toward the opposite state so preview can't read as a toggle.
+  private func applyAppearance(animated: Bool) {
+    let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    let shouldAnimate = animated && window != nil && !reduceMotion
+    CATransaction.begin()
+    CATransaction.setDisableActions(!shouldAnimate)
+    CATransaction.setAnimationDuration(0.3)
+    CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+
+    let mixT: CGFloat = (isHovered && isControlEnabled) ? hoverMix : 0
+    let base = isActive ? Self.emberStops : Self.greyStops
+    let opposite = isActive ? Self.greyStops : Self.emberStops
+    if let grad = orbLayer.value(forKey: "gradient") as? CAGradientLayer {
+      grad.colors = zip(base, opposite).map { Self.mix($0, $1, t: mixT).cgColor }
+    }
+    if isActive {
+      glowLayer.opacity = isHovered ? 0.75 : 1
+      orbLayer.opacity = isPressed ? 0.9 : 1
+      glowLayer.backgroundColor = Self.mix(
+        NSColor(calibratedRed: 1.0, green: 0.24, blue: 0.13, alpha: 0.28),
+        NSColor(calibratedWhite: 0.35, alpha: 0.10), t: mixT
+      ).cgColor
+    } else {
+      glowLayer.opacity = isHovered ? 0.55 : 0.22
+      orbLayer.opacity = isPressed ? 0.75 : 0.85
+      glowLayer.backgroundColor = Self.mix(
+        NSColor(calibratedWhite: 0.35, alpha: 0.10),
+        NSColor(calibratedRed: 1.0, green: 0.24, blue: 0.13, alpha: 0.28), t: mixT
+      ).cgColor
+    }
+    highlightLayer.opacity = isHovered ? 1 : 0.8
+    // Power glyph: subtle at idle, prominent on hover/press, dimmed when the
+    // control is disabled. Slightly stronger when on so it reads on ember.
+    let glyphIdle: Float = isActive ? 0.30 : 0.25
+    let glyphHover: Float = isActive ? 0.60 : 0.55
+    glyphView.alphaValue =
+      !isControlEnabled ? 0.15 : isPressed ? 0.75 : (isHovered ? CGFloat(glyphHover) : CGFloat(glyphIdle))
+    for (i, w) in waveLayers.enumerated() {
+      let baseAlpha: Float
+      if isActive {
+        baseAlpha = max(0.05, 0.22 - Float(i) * 0.03)
+      } else {
+        baseAlpha = 0.06
       }
+      // Hover slightly strengthens waves as part of the preview.
+      w.opacity = (isHovered && isControlEnabled) ? min(1, baseAlpha + 0.08) : baseAlpha
+      let c: NSColor =
+        isActive || (isHovered && isControlEnabled)
+        ? NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.22, alpha: CGFloat(baseAlpha) + (isHovered ? hoverMix * 0.1 : 0))
+        : NSColor(calibratedWhite: 0.45, alpha: CGFloat(baseAlpha))
+      w.strokeColor = c.cgColor
+    }
+    CATransaction.commit()
+
+    // Pulse and hover never stack: pause the pulse while previewing.
+    if isHovered, isControlEnabled {
+      stopPulse()
+    } else if isActive {
       startPulseIfNeeded()
     } else {
-      glowLayer.opacity = 0.22
-      orbLayer.opacity = 0.85
-      glowLayer.backgroundColor = NSColor(calibratedWhite: 0.35, alpha: 0.10).cgColor
-      if let grad = orbLayer.value(forKey: "gradient") as? CAGradientLayer {
-        grad.colors = [
-          NSColor(calibratedWhite: 0.52, alpha: 1.0).cgColor,
-          NSColor(calibratedWhite: 0.42, alpha: 1.0).cgColor,
-          NSColor(calibratedWhite: 0.32, alpha: 1.0).cgColor,
-        ]
-      }
       stopPulse()
-    }
-    let alpha: CGFloat = active ? 0.22 : 0.06
-    for (i, w) in waveLayers.enumerated() {
-      let c: NSColor = active ? NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.22, alpha: alpha - CGFloat(i)*0.03) : NSColor(calibratedWhite: 0.45, alpha: alpha)
-      w.strokeColor = c.cgColor
     }
   }
 
@@ -178,9 +279,9 @@ final class EmberOrbView: NSView {
     if window == nil || window?.isVisible == false || window?.occlusionState.contains(.visible) == false {
       return
     }
-    pulsing = true
-    // Respect reduce motion
+    // Respect Reduce Motion: do not mark as pulsing when no animation is installed.
     if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return }
+    pulsing = true
 
     let scale = CABasicAnimation(keyPath: "transform.scale")
     scale.fromValue = 1.0
@@ -217,6 +318,140 @@ final class EmberOrbView: NSView {
     glowLayer.removeAnimation(forKey: "pulseGlow")
   }
 
+  /// Explicit stop for popover close/occlusion; restarts only when visible+active.
+  func stopRepetitiveAnimation() { stopPulse() }
+
+  func setWavesVisible(_ visible: Bool) {
+    for (i, w) in waveLayers.enumerated() {
+      let base = i < waveBaseOpacity.count ? waveBaseOpacity[i] : w.opacity
+      w.opacity = visible ? base : 0.15
+    }
+  }
+
+  // MARK: - On/off button behavior
+
+  func setControlEnabled(_ enabled: Bool) {
+    isControlEnabled = enabled
+    if !enabled {
+      setHovered(false)
+      isPressed = false
+    }
+    applyAppearance(animated: false)
+  }
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let trackingArea { removeTrackingArea(trackingArea) }
+    let area = NSTrackingArea(
+      rect: bounds,
+      options: [.mouseEnteredAndExited, .activeInKeyWindow],
+      owner: self, userInfo: nil)
+    addTrackingArea(area)
+    trackingArea = area
+  }
+
+  private func setHovered(_ hovered: Bool) {
+    guard hovered != isHovered else { return }
+    isHovered = hovered
+    applyAppearance(animated: true)
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    super.mouseEntered(with: event)
+    guard isControlEnabled else { return }
+    setHovered(true)
+    if !cursorPushed {
+      NSCursor.pointingHand.push()
+      cursorPushed = true
+    }
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    super.mouseExited(with: event)
+    setHovered(false)
+    if cursorPushed {
+      NSCursor.pop()
+      cursorPushed = false
+    }
+  }
+
+  private func orbHit(point: CGPoint) -> Bool {
+    // Hit area is the orb circle (generous: bounding square of the orb).
+    let orbSize: CGFloat = 72
+    let orbRect = NSRect(
+      x: (bounds.width - orbSize) / 2,
+      y: (bounds.height - orbSize) / 2 + 8,
+      width: orbSize,
+      height: orbSize
+    )
+    return orbRect.insetBy(dx: -6, dy: -6).contains(point)
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    guard isControlEnabled else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    guard orbHit(point: point) else { return }
+    isPressed = true
+    applyAppearance(animated: false)
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    guard isPressed else { return }
+    isPressed = false
+    applyAppearance(animated: false)
+    guard isControlEnabled else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    guard orbHit(point: point) else { return }
+    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+    onToggle?()
+  }
+
+  override var acceptsFirstResponder: Bool { true }
+  override func becomeFirstResponder() -> Bool { true }
+  override func resignFirstResponder() -> Bool { true }
+
+  override func keyDown(with event: NSEvent) {
+    guard isControlEnabled else { super.keyDown(with: event); return }
+    if event.keyCode == 49 || event.keyCode == 36 { // Space / Return
+      NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+      onToggle?()
+    } else {
+      super.keyDown(with: event)
+    }
+  }
+
+  override func drawFocusRingMask() {
+    let orbSize: CGFloat = 72
+    let orbRect = NSRect(
+      x: (bounds.width - orbSize) / 2,
+      y: (bounds.height - orbSize) / 2 + 8,
+      width: orbSize,
+      height: orbSize
+    )
+    NSBezierPath(ovalIn: orbRect.insetBy(dx: -4, dy: -4)).fill()
+  }
+
+  override var focusRingMaskBounds: NSRect { bounds }
+
+  override func accessibilityRole() -> NSAccessibility.Role? { .button }
+  override func accessibilityLabel() -> String? { "Ember display filter" }
+  override func accessibilityValue() -> Any? { isActive ? "On" : "Off" }
+  override func accessibilityHelp() -> String? {
+    isActive
+      ? "Turns Ember off and restores the original display."
+      : "Turns Ember on with the selected warmth and software brightness."
+  }
+  override func isAccessibilityEnabled() -> Bool { isControlEnabled }
+  override func accessibilityPerformPress() -> Bool {
+    guard isControlEnabled else { return false }
+    onToggle?()
+    return true
+  }
+
+  private func updateAccessibilityValue() {
+    setAccessibilityValue(isActive ? "On" : "Off")
+  }
+
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
     // Sync with current active state on appearance; pause when off-screen
@@ -236,6 +471,12 @@ final class EmberOrbView: NSView {
   override func viewDidHide() {
     super.viewDidHide()
     stopPulse()
+    // Never strand a pushed cursor when the popover closes mid-hover.
+    setHovered(false)
+    if cursorPushed {
+      NSCursor.pop()
+      cursorPushed = false
+    }
   }
 
   override func viewDidUnhide() {
@@ -251,6 +492,10 @@ final class HeroStatusView: NSView {
   private let bgLayer = CAGradientLayer()
   private let borderLayer = CALayer()
   private let orbView = EmberOrbView(frame: .zero)
+  /// Panel on/off action, triggered by the orb button.
+  var onOrbToggle: (() -> Void)? {
+    didSet { orbView.onToggle = onOrbToggle }
+  }
 
   let titleLabel = NSTextField(labelWithString: "Pure Red is on")
   let detailLabel = NSTextField(wrappingLabelWithString: "Your display is tuned for deep rest and recovery.")
@@ -289,7 +534,9 @@ final class HeroStatusView: NSView {
     detailLabel.textColor = EmberColor.textSecondary
     detailLabel.maximumNumberOfLines = 2
     detailLabel.lineBreakMode = .byWordWrapping
-    // preferredMaxLayoutWidth set dynamically in layout() to actual textStack width
+    // Static wrap width (see EmberMetrics): deriving it from bounds at layout
+    // time feeds the width↔wrap feedback loop that grows the window.
+    detailLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
 
     metaIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
     metaIcon.contentTintColor = EmberColor.textTertiary
@@ -297,11 +544,13 @@ final class HeroStatusView: NSView {
     metaLabel.font = EmberFont.rowCaption()
     metaLabel.textColor = EmberColor.textSecondary
     metaLabel.lineBreakMode = .byTruncatingTail
+    metaLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
 
     sunsetLabel.font = EmberFont.rowCaption()
     sunsetLabel.textColor = EmberColor.textMuted
     sunsetLabel.lineBreakMode = .byTruncatingTail
     sunsetLabel.maximumNumberOfLines = 1
+    sunsetLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
     // sunset time part will be recolored via attributed string in render
 
     // Layout
@@ -350,13 +599,10 @@ final class HeroStatusView: NSView {
   override func layout() {
     super.layout()
     bgLayer.frame = bounds
-    // Hero: 358 = 390 - 16*2 inset; text leading 16, orb 124, gap 12, trailing 8 => 198 available
-    let available = max(0, bounds.width - 16 - 8 - 12 - 124)
-    if available > 0 {
-      detailLabel.preferredMaxLayoutWidth = available
-      metaLabel.preferredMaxLayoutWidth = available
-      sunsetLabel.preferredMaxLayoutWidth = available
-    }
+  }
+
+  func setOrbEnabled(_ enabled: Bool) {
+    orbView.setControlEnabled(enabled)
   }
 
   func render(title: String, detail: String, metaIconName: String?, metaText: String, sunsetText: NSAttributedString?, isActive: Bool, showWaves: Bool) {
@@ -382,9 +628,9 @@ final class HeroStatusView: NSView {
       : [EmberColor.surfaceHeroFrom.cgColor, EmberColor.surfaceHeroTo.cgColor]
     layer?.borderColor = isActive ? EmberColor.borderHero.cgColor : EmberColor.borderSubtle.cgColor
     orbView.setActive(isActive, animated: true)
-    orbView.isHidden = !showWaves // keep hidden for off? spec shows sun even dim - but we show dimmed
-    // Always show orb per screenshot, but dim when off
+    // showWaves is honored: waves/extra glow only when requested and active.
     orbView.isHidden = false
+    orbView.setWavesVisible(showWaves && isActive)
     needsDisplay = true
   }
 

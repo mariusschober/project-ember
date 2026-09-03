@@ -25,6 +25,7 @@ let package = Package(
       ]
     ),
     .executableTarget(name: "EmberCoreChecks", dependencies: ["EmberCore"]),
+    .testTarget(name: "EmberCoreTests", dependencies: ["EmberCore"]),
   ],
   swiftLanguageModes: [.v6]
 )

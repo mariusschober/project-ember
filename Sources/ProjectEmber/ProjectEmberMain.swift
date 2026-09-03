@@ -122,7 +122,7 @@ enum ProjectEmberMain {
       )
       try journal.save(
         RecoveryRecord(
-          appVersion: "0.2.0-self-test",
+          appVersion: AppVersion.marketing + "-self-test",
           displays: entries,
           intendedSettings: settings
         ))
@@ -281,7 +281,7 @@ enum ProjectEmberMain {
 
       try journal.save(
         RecoveryRecord(
-          appVersion: "0.2.0-crash-recovery-test",
+          appVersion: AppVersion.marketing + "-crash-recovery-test",
           displays: entries,
           intendedSettings: settings
         ))

@@ -18,8 +18,14 @@ final class EmberSliderCell: NSSliderCell {
     let alpha: CGFloat = isEnabled ? 1 : 0.42
 
     let trackHeight: CGFloat = EmberMetrics.sliderTrackHeight
+    // Inset the track by half the thumb plus padding so the 22pt thumb stays
+    // fully visible at 0% and 100% (knobRect uses the same insets, keeping
+    // track and knob mappings in agreement).
+    let endInset = EmberMetrics.sliderEndInset
     let y = rect.midY - trackHeight/2
-    let trackRect = NSRect(x: rect.minX + 2, y: y, width: rect.width - 4, height: trackHeight)
+    let trackRect = NSRect(
+      x: rect.minX + endInset, y: y,
+      width: max(0, rect.width - (endInset * 2)), height: trackHeight)
     let path = NSBezierPath(roundedRect: trackRect, xRadius: trackHeight/2, yRadius: trackHeight/2)
 
     NSGraphicsContext.saveGraphicsState()
@@ -39,21 +45,20 @@ final class EmberSliderCell: NSSliderCell {
     filledPath.addClip()
 
     if variant == .warmth {
-      // Gradient from neutral gray to ember orange to pure red
-      let gradient: NSGradient
-      if valueRatio <= 0.82 {
-        gradient = NSGradient(colors: [
-          EmberColor.sliderTrackWarmNeutral.withAlphaComponent(alpha),
-          EmberColor.sliderTrackWarmMid.withAlphaComponent(alpha),
-        ])!
-      } else {
-        // blend mid to pure red tail
-        gradient = NSGradient(colors: [
-          EmberColor.sliderTrackWarmMid.withAlphaComponent(alpha),
-          EmberColor.ember500.withAlphaComponent(alpha),
-        ])!
-      }
-      gradient.draw(in: filledRect, angle: 0)
+      // Fixed three-stop warmth gradient (neutral → evening → pure red),
+      // clipped to the filled portion. Never replace the fill after 82%;
+      // the left side must not jump color.
+      let gradient = NSGradient(colors: [
+        EmberColor.sliderTrackWarmNeutral.withAlphaComponent(alpha),
+        EmberColor.sliderTrackWarmMid.withAlphaComponent(alpha),
+        EmberColor.ember500.withAlphaComponent(alpha),
+      ])!
+      // Draw the full three-stop gradient across the entire track, clipped to fill.
+      NSGraphicsContext.saveGraphicsState()
+      // Clip already set to filledPath; draw gradient mapped to full track width
+      // so the visible left side is stable as value changes.
+      gradient.draw(in: trackRect, angle: 0)
+      NSGraphicsContext.restoreGraphicsState()
     } else {
       // brightness: solid ember with dim to bright interpolation
       let start = EmberColor.sliderTrackDim.withAlphaComponent(alpha * 0.55)
@@ -144,9 +149,20 @@ final class EmberSliderCell: NSSliderCell {
   }
 
   override func knobRect(flipped: Bool) -> NSRect {
-    let rect = super.knobRect(flipped: flipped)
-    // Keep centered, but ensure size matches our thumb
-    return rect
+    // Map the value range onto the same inset track drawBar uses, so the knob
+    // center always sits on the track and the full thumb stays in bounds.
+    guard let slider = controlView as? NSSlider else { return super.knobRect(flipped: flipped) }
+    let bounds = slider.bounds
+    let endInset = EmberMetrics.sliderEndInset
+    let usable = max(0, bounds.width - (endInset * 2))
+    let ratio: CGFloat =
+      maxValue == minValue ? 0 : CGFloat((doubleValue - minValue) / (maxValue - minValue))
+    let centerX = endInset + (usable * min(max(ratio, 0), 1))
+    let size = EmberMetrics.sliderThumb
+    // NSSliderCell knob thickness follows the control height; center vertically.
+    let knobHeight = super.knobRect(flipped: flipped).height
+    let centerY = bounds.midY
+    return NSRect(x: centerX - size / 2, y: centerY - knobHeight / 2, width: size, height: knobHeight)
   }
 }
 

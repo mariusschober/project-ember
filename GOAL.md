@@ -1,4 +1,7 @@
-# Project Ember 0.2 goal
+# Project Ember goal (historical: 0.2 beta)
+
+> Retained for history. The 0.2 criteria below are superseded by the 0.4.0
+> scope; see `CHANGELOG.md` and `RELEASE_NOTES.md` for the current release.
 
 Build a private, native Apple-silicon macOS 14+ menu-bar application that gives
 the owner reversible control over every compatible connected display: warmth,

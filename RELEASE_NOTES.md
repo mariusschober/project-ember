@@ -1,31 +1,60 @@
-# Project Ember 0.3.0 local beta
+# Project Ember 0.4.0 — Reliability, UX, and Release Hardening
 
-This release extends the original built-in-display beta to every compatible
-connected display, adds optional local Sun scheduling, and hardens the
-existing app for continuous menu-bar operation.
+Release candidate for personal use and direct beta. Not 1.0: 1.0 requires the
+hardware acceptance matrix plus Developer ID-signed, notarized artifacts.
 
-Included:
+## Included
 
-- independent display identity and 1024-sample gamma support on the tested
-  MacBook panel and Dell S2419H over USB-C/HDMI;
-- transactional multi-display capture, journal, apply, readback, and restore;
-- schema-v2 recovery with schema-v1 migration and pending disconnected-display
-  restoration;
-- partial compatibility reporting instead of all-or-nothing failure;
-- capability-gated built-in Backlight Lock without external DDC/CI writes;
-- one-shot approximate Core Location with on-device NOAA solar calculations;
-- sunset activation, sunrise restoration, missed-boundary reconciliation, and
-  manual overrides until the next solar event;
-- a one-view Sun schedule control and per-display status copy;
-- 55 deterministic core checks plus reversible two-display system, lifecycle,
-  and crash-recovery tests;
-- no accounts, licensing, telemetry, or network services;
-- production hardening: 5 s backlight guard (80% fewer wakeups), coalesced
-  slider updates, separate solar/ retry timers, robust sleep/wake and
-  pending-restore handling, atomic journal with 600 permissions and no-backup
-  flag, and paused orb animation while idle.
+- Generation-based topology reconciliation (no app-initiated neutral flash on
+  unchanged displays; verified readback drives the UI).
+- Fail-safe journaling with quarantine/backup, verified restores, and safe
+  legacy handling.
+- Desired/observed/presentation separation with truthful counts and attention
+  states (Retry/Reset, Copy/Export Diagnostics).
+- Built-in-only reversible Backlight Lock with read-before-write guard and
+  retained preference.
+- Menu-bar click behavior (Open Controls default; Toggle Ember optional;
+  right-click always opens controls).
+- Sun schedule hardening and structured solar presentation.
+- AppKit refinements: fitted no-scroll panel, hero orb on/off control with
+  hover preview, full-width settings rows, constraint-pinned preset highlight,
+  contrast/accessibility fixes, footer author link, mechanism-based copy.
+- `EmberCoreTests` (36 tests) + `EmberCoreChecks`; CI; local + production
+  build scripts.
+- Privacy: on-device approximate location/settings; no analytics/networking.
 
-True grayscale and E-Ink simulation were evaluated and intentionally discarded:
-the safe gamma-table pipeline cannot perform the required cross-channel mixing.
+## Hardware verification (this release)
 
-Known distribution limitation: this build is ad-hoc signed and not notarized.
+Reversible physical tests were executed 2026-09-03 on MacBook Pro (M1 Pro,
+macOS 26.6.2) with built-in Liquid Retina XDR + Dell S2419H external:
+
+```
+ProjectEmber --system-probe               # pass: 2/2 compatible, 1024 samples,
+                                          # backlight control on built-in only
+ProjectEmber --system-self-test           # pass: gamma apply/restore, Pure Red,
+                                          # Backlight Lock, auto-brightness restore,
+                                          # journal cleared
+ProjectEmber --lifecycle-self-test        # pass: live updates, backlight guard,
+                                          # reconfig, sleep/wake/termination restores
+ProjectEmber --prepare-crash-recovery-test && ProjectEmber --recover-only
+                                          # pass: startup recovery verified,
+                                          # journal cleared
+```
+
+Not performed: the full acceptance matrix (20× HDMI/USB-C hot-plug cycles,
+VoiceOver/keyboard/a11y pass, 8-hour idle observation, etc.). Do not claim
+1.0 readiness until that matrix passes on real hardware plus Developer ID
+signing/notarization.
+
+## Known distribution limitation
+
+Local builds are ad-hoc signed. Public beta requires
+`scripts/build-production-release.sh` with a Developer ID Application identity
+and notarytool profile (Hardened Runtime, timestamp, submit/staple/validate,
+DMG smoke-check, SHA-256).
+
+## Known limitations
+
+Private DisplayServices use; external-display timing; spectral variability;
+software-dimming banding; no PWM measurement. No explicit license yet — owner
+decision required before public 1.0 (see SECURITY.md).

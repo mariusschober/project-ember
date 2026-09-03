@@ -10,6 +10,11 @@ public struct AutomationOverride: Codable, Equatable, Sendable {
   }
 }
 
+public enum MenuBarPrimaryAction: String, Codable, Sendable, CaseIterable {
+  case openControls
+  case toggleEmber
+}
+
 public struct EmberSettings: Codable, Equatable, Sendable {
   public var warmth: Double
   public var apparentBrightness: Double
@@ -18,6 +23,7 @@ public struct EmberSettings: Codable, Equatable, Sendable {
   public var launchAtLogin: Bool
   public var sunScheduleEnabled: Bool
   public var automationOverride: AutomationOverride?
+  public var menuBarPrimaryAction: MenuBarPrimaryAction
 
   public init(
     warmth: Double = 0.62,
@@ -26,7 +32,8 @@ public struct EmberSettings: Codable, Equatable, Sendable {
     backlightLockEnabled: Bool = false,
     launchAtLogin: Bool = false,
     sunScheduleEnabled: Bool = false,
-    automationOverride: AutomationOverride? = nil
+    automationOverride: AutomationOverride? = nil,
+    menuBarPrimaryAction: MenuBarPrimaryAction = .openControls
   ) {
     self.warmth = warmth.clamped(to: 0...1)
     self.apparentBrightness = apparentBrightness.clamped(to: 0.10...1)
@@ -35,6 +42,7 @@ public struct EmberSettings: Codable, Equatable, Sendable {
     self.launchAtLogin = launchAtLogin
     self.sunScheduleEnabled = sunScheduleEnabled
     self.automationOverride = automationOverride
+    self.menuBarPrimaryAction = menuBarPrimaryAction
   }
 
   public static let `default` = EmberSettings()
@@ -55,6 +63,7 @@ public struct EmberSettings: Codable, Equatable, Sendable {
     case launchAtLogin
     case sunScheduleEnabled
     case automationOverride
+    case menuBarPrimaryAction
   }
 
   public init(from decoder: Decoder) throws {
@@ -78,6 +87,10 @@ public struct EmberSettings: Codable, Equatable, Sendable {
       AutomationOverride.self,
       forKey: .automationOverride
     )
+    // Backward compatible: 0.3.0 settings decode with .openControls default.
+    menuBarPrimaryAction =
+      try values.decodeIfPresent(MenuBarPrimaryAction.self, forKey: .menuBarPrimaryAction)
+      ?? .openControls
     normalize()
   }
 }
@@ -188,6 +201,13 @@ public struct DisplayIdentity: Codable, Equatable, Hashable, Sendable {
       && unitNumber == other.unitNumber
       && isBuiltIn == other.isBuiltIn
   }
+
+  /// True when this identity cannot uniquely distinguish a physical display
+  /// (no UUID, zero serial). Callers must not mutate on ambiguity.
+  public var isAmbiguousWithoutUUID: Bool {
+    guard uuid == nil || uuid?.isEmpty == true else { return false }
+    return serialNumber == 0
+  }
 }
 
 public struct DisplayBaseline: Codable, Equatable, Sendable {
@@ -284,7 +304,17 @@ public struct RecoveryRecord: Codable, Equatable, Sendable {
       [DisplayRecoveryEntry].self,
       forKey: .displays
     ) {
-      schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 2
+      let version = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 2
+      // Reject future unknown schemas explicitly; do not decode as if schema 2.
+      guard version <= AppVersion.maxSupportedSchemaVersion else {
+        throw DecodingError.dataCorruptedError(
+          forKey: .schemaVersion,
+          in: values,
+          debugDescription:
+            "Unsupported recovery schema v\(version); this build supports up to v\(AppVersion.maxSupportedSchemaVersion)."
+        )
+      }
+      schemaVersion = version
       displays = decodedDisplays
     } else {
       let legacyDisplay = try values.decode(DisplayBaseline.self, forKey: .display)
@@ -315,6 +345,7 @@ public enum EmberError: LocalizedError, Equatable, Sendable {
   case noCompatibleDisplay
   case displayUnavailable
   case displayIdentityMismatch
+  case displayIdentityAmbiguous(String)
   case gammaReadFailed(Int32)
   case gammaWriteFailed(Int32)
   case gammaVerificationFailed
@@ -325,6 +356,9 @@ public enum EmberError: LocalizedError, Equatable, Sendable {
   case ambientLightReadFailed(Int32)
   case ambientLightWriteFailed(Int32)
   case recoveryFailed(String)
+  case journalCorrupt(String)
+  case journalUnsupportedSchema(Int)
+  case externalOverrideDetected(String)
 
   public var errorDescription: String? {
     switch self {
@@ -336,6 +370,8 @@ public enum EmberError: LocalizedError, Equatable, Sendable {
       "The saved display is not currently connected."
     case .displayIdentityMismatch:
       "The connected display does not match the saved recovery baseline."
+    case .displayIdentityAmbiguous(let reason):
+      "Display identity is ambiguous; left untouched. \(reason)"
     case .gammaReadFailed(let code):
       "The current display color table could not be read (code \(code))."
     case .gammaWriteFailed(let code):
@@ -356,6 +392,12 @@ public enum EmberError: LocalizedError, Equatable, Sendable {
       "Automatic brightness state could not be changed (code \(code))."
     case .recoveryFailed(let message):
       "Display recovery failed: \(message)"
+    case .journalCorrupt(let reason):
+      "Recovery journal is unreadable and was preserved for inspection: \(reason)"
+    case .journalUnsupportedSchema(let version):
+      "Recovery journal uses unsupported schema v\(version)."
+    case .externalOverrideDetected(let message):
+      "Another display service is repeatedly replacing Ember’s color table. \(message)"
     }
   }
 }

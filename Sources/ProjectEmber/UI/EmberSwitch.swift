@@ -4,29 +4,27 @@ import AppKit
 final class EmberSwitch: NSControl {
   private let trackLayer = CALayer()
   private let thumbLayer = CALayer()
-  private let thumbShadow = CALayer()
 
-  var isOn: Bool = false {
-    didSet { if oldValue != isOn { updateVisual(animated: true) } }
+  private var _isOn = false
+  var isOn: Bool {
+    get { _isOn }
+    set { setOn(newValue, animated: true) }
   }
 
   var state: NSControl.StateValue {
-    get { isOn ? .on : .off }
-    set {
-      if isOn != (newValue == .on) {
-        isOn = (newValue == .on)
-        updateVisual(animated: false)
-      }
-    }
+    get { _isOn ? .on : .off }
+    set { setOn(newValue == .on, animated: false) }
   }
 
+  /// Single visual-update path for isOn/state/setOn/setState.
   func setOn(_ on: Bool, animated: Bool) {
-    guard isOn != on else { return }
-    isOn = on
+    guard _isOn != on else { return }
+    _isOn = on
     updateVisual(animated: animated)
   }
 
   private var isPressed = false
+  private var pressedInside = false
 
   init() {
     super.init(frame: NSRect(x: 0, y: 0, width: 44, height: 26))
@@ -69,7 +67,7 @@ final class EmberSwitch: NSControl {
     let y = (bounds.height - thumbSize)/2
     let xOn = bounds.width - thumbSize - 2
     let xOff: CGFloat = 2
-    let targetX = isOn ? xOn : xOff
+    let targetX = _isOn ? xOn : xOff
     thumbLayer.frame = NSRect(x: targetX, y: y, width: thumbSize, height: thumbSize)
     thumbLayer.cornerRadius = thumbSize/2
   }
@@ -79,19 +77,23 @@ final class EmberSwitch: NSControl {
     let offColor = NSColor(calibratedWhite: 0.26, alpha: 1.0).cgColor
     let borderOn = NSColor(calibratedRed: 1.0, green: 0.45, blue: 0.30, alpha: 0.22).cgColor
     let borderOff = NSColor.white.withAlphaComponent(0.06).cgColor
+    let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    let shouldAnimate = animated && window != nil && !reduceMotion
 
-    if animated && window != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+    if shouldAnimate {
       let colorAnim = CABasicAnimation(keyPath: "backgroundColor")
       colorAnim.fromValue = trackLayer.backgroundColor
-      colorAnim.toValue = isOn ? onColor : offColor
+      colorAnim.toValue = _isOn ? onColor : offColor
       colorAnim.duration = 0.22
       colorAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
       trackLayer.add(colorAnim, forKey: "bg")
+    } else {
+      trackLayer.removeAnimation(forKey: "bg")
     }
-    trackLayer.backgroundColor = isOn ? onColor : offColor
-    trackLayer.borderColor = isOn ? borderOn : borderOff
+    trackLayer.backgroundColor = _isOn ? onColor : offColor
+    trackLayer.borderColor = _isOn ? borderOn : borderOff
 
-    if animated && window != nil {
+    if shouldAnimate {
       NSAnimationContext.runAnimationGroup { ctx in
         ctx.duration = 0.22
         ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -100,8 +102,9 @@ final class EmberSwitch: NSControl {
       }
     } else {
       needsLayout = true
+      layout()
     }
-    setAccessibilityValue(isOn ? "On" : "Off")
+    setAccessibilityValue(_isOn ? "On" : "Off")
   }
 
   private func sendActionIfNeeded() {
@@ -110,19 +113,28 @@ final class EmberSwitch: NSControl {
     }
   }
 
-  override func mouseDown(with event: NSEvent) { isPressed = true }
+  override func mouseDown(with event: NSEvent) {
+    guard isEnabled else { return }
+    isPressed = true
+    pressedInside = bounds.contains(convert(event.locationInWindow, from: nil))
+  }
   override func mouseUp(with event: NSEvent) {
     guard isPressed else { return }
     isPressed = false
     guard isEnabled else { return }
-    isOn.toggle()
+    // Toggle on mouse-up only when pointer is still inside after valid mouse-down.
+    let inside = bounds.contains(convert(event.locationInWindow, from: nil)) && pressedInside
+    guard inside else { needsLayout = true; return }
+    setOn(!_isOn, animated: true)
     needsLayout = true
     NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
     sendActionIfNeeded()
   }
   override func keyDown(with event: NSEvent) {
+    // Guard keyboard activation when disabled.
+    guard isEnabled else { super.keyDown(with: event); return }
     if event.keyCode == 49 || event.keyCode == 36 {
-      isOn.toggle()
+      setOn(!_isOn, animated: true)
       sendActionIfNeeded()
     } else { super.keyDown(with: event) }
   }
@@ -134,11 +146,18 @@ final class EmberSwitch: NSControl {
     path.fill()
   }
   override var focusRingMaskBounds: NSRect { bounds.insetBy(dx: -3, dy: -3) }
-  override func accessibilityValue() -> Any? { isOn ? 1 : 0 }
+  override func accessibilityValue() -> Any? { _isOn ? 1 : 0 }
   override func isAccessibilityEnabled() -> Bool { isEnabled }
+  override func accessibilityPerformPress() -> Bool {
+    guard isEnabled else { return false }
+    setOn(!_isOn, animated: true)
+    sendActionIfNeeded()
+    return true
+  }
+  override func accessibilityRole() -> NSAccessibility.Role? { .checkBox }
+  override func accessibilityLabel() -> String? { "Toggle" }
   func setState(_ s: NSControl.StateValue) {
-    state = s
-    updateVisual(animated: false)
+    setOn(s == .on, animated: false)
   }
 }
 
@@ -147,7 +166,7 @@ final class EmberToggleRowView: NSView {
   let iconView = NSImageView()
   let titleLabel = NSTextField(labelWithString: "")
   let detailLabel = NSTextField(wrappingLabelWithString: "")
-  let captionLabel = NSTextField(labelWithString: "")
+  let captionLabel = NSTextField(wrappingLabelWithString: "")
   let toggle = EmberSwitch()
   var actionButton: NSButton?
 
@@ -158,12 +177,24 @@ final class EmberToggleRowView: NSView {
     iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
     iconView.contentTintColor = EmberColor.textTertiary
     iconView.translatesAutoresizingMaskIntoConstraints = false
-    iconView.widthAnchor.constraint(equalToConstant: 20).isActive = true
-    iconView.heightAnchor.constraint(equalToConstant: 20).isActive = true
     iconView.imageScaling = .scaleProportionallyDown
     if let img = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: title) {
       iconView.image = img
     }
+    // Fixed-size icon box: the image view carries internal symbol aspect
+    // constraints that fight a second required height (stretched icons), so
+    // the box owns the 20×20 geometry and the glyph letterboxes inside it.
+    let iconBox = NSView()
+    iconBox.translatesAutoresizingMaskIntoConstraints = false
+    iconBox.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    iconBox.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth).isActive = true
+    iconBox.addSubview(iconView)
+    NSLayoutConstraint.activate([
+      iconView.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
+      iconView.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
+      iconView.widthAnchor.constraint(lessThanOrEqualToConstant: EmberMetrics.rowIconWidth),
+      iconView.heightAnchor.constraint(lessThanOrEqualToConstant: EmberMetrics.rowIconWidth),
+    ])
 
     titleLabel.stringValue = title
     titleLabel.font = EmberFont.rowTitle()
@@ -176,17 +207,20 @@ final class EmberToggleRowView: NSView {
     detailLabel.font = EmberFont.rowDetail()
     detailLabel.textColor = EmberColor.textSecondary
     detailLabel.maximumNumberOfLines = 2
-    detailLabel.preferredMaxLayoutWidth = 244
+    detailLabel.preferredMaxLayoutWidth = EmberMetrics.rowTextWidth
     detailLabel.lineBreakMode = .byWordWrapping
-    detailLabel.setContentHuggingPriority(.defaultLow, for: .vertical)
+    // Required vertical hugging (with a fixed wrap width) gives the row a
+    // unique height and clears hasAmbiguousLayout; compression stays default
+    // so tight spaces can still squeeze gracefully.
+    detailLabel.setContentHuggingPriority(.required, for: .vertical)
 
     captionLabel.font = EmberFont.rowCaption()
     captionLabel.textColor = EmberColor.textMuted
     captionLabel.isHidden = true
     captionLabel.maximumNumberOfLines = 2
+    captionLabel.preferredMaxLayoutWidth = EmberMetrics.rowTextWidth
     captionLabel.lineBreakMode = .byWordWrapping
-    captionLabel.preferredMaxLayoutWidth = 244
-    captionLabel.setContentHuggingPriority(.defaultLow, for: .vertical)
+    captionLabel.setContentHuggingPriority(.required, for: .vertical)
 
     let textStack = NSStackView(views: [titleLabel, detailLabel, captionLabel])
     textStack.orientation = .vertical
@@ -204,32 +238,38 @@ final class EmberToggleRowView: NSView {
     toggle.setContentHuggingPriority(.required, for: .horizontal)
     toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-    // Fixed row height 81, but allow growth for location button case.
-    // Icon and toggle are centered to the row, textStack is top-pinned so title never shifts when detail wraps 1↔2 lines.
-    addSubview(iconView)
+    // Stable top/title grid: icon and switch align to the title line, detail
+    // and caption grow downward. Title baselines stay identical across rows.
+    // All insets come from the shared EmberMetrics row grid so toggle rows,
+    // the behavior row, and slider icon columns line up.
+    addSubview(iconBox)
     addSubview(textStack)
     addSubview(toggle)
     NSLayoutConstraint.activate([
-      iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-      iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: 20),
-      iconView.heightAnchor.constraint(equalToConstant: 20),
+      iconBox.leadingAnchor.constraint(
+        equalTo: leadingAnchor, constant: EmberMetrics.rowLeadingInset),
+      iconBox.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+      iconBox.widthAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
+      iconBox.heightAnchor.constraint(equalToConstant: EmberMetrics.rowIconWidth),
 
-      toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-      toggle.centerYAnchor.constraint(equalTo: centerYAnchor),
+      toggle.trailingAnchor.constraint(
+        equalTo: trailingAnchor, constant: -EmberMetrics.rowTrailingInset),
+      toggle.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
       toggle.widthAnchor.constraint(equalToConstant: 44),
       toggle.heightAnchor.constraint(equalToConstant: 26),
 
-      textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+      textStack.leadingAnchor.constraint(
+        equalTo: iconBox.trailingAnchor, constant: EmberMetrics.rowIconTextGap),
       textStack.trailingAnchor.constraint(equalTo: toggle.leadingAnchor, constant: -12),
-      textStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-      textStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
-      textStack.widthAnchor.constraint(lessThanOrEqualToConstant: 244),
-      heightAnchor.constraint(greaterThanOrEqualToConstant: 81),
+      textStack.topAnchor.constraint(
+        equalTo: topAnchor, constant: EmberMetrics.rowTopPadding),
+      textStack.bottomAnchor.constraint(
+        lessThanOrEqualTo: bottomAnchor, constant: -EmberMetrics.rowBottomPadding),
+      // Minimum height only (required): with required label hugging the row
+      // height resolves uniquely to max(minimum, content) instead of staying
+      // ambiguous behind a non-required equal-height constraint.
+      heightAnchor.constraint(greaterThanOrEqualToConstant: EmberMetrics.rowMinHeight),
     ])
-    let h81 = heightAnchor.constraint(equalToConstant: 81)
-    h81.priority = .defaultHigh
-    h81.isActive = true
     // Ensure textStack doesn't compress toggle
     textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
   }
@@ -281,6 +321,7 @@ final class EmberSettingsCard: NSView {
     layer?.borderColor = EmberColor.borderCard.cgColor
     stack.orientation = .vertical
     stack.spacing = 0
+    stack.alignment = .leading
     stack.translatesAutoresizingMaskIntoConstraints = false
     addSubview(stack)
     NSLayoutConstraint.activate([
@@ -292,15 +333,40 @@ final class EmberSettingsCard: NSView {
   }
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
+  /// Rows must fill the card width deterministically: without an explicit
+  /// width pin, rows size to intrinsic text width and stagger (icons and
+  /// titles land on different x per row). Same pattern as the outer stack.
+  private func pinFullWidth(_ view: NSView) {
+    view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+  }
   func addRow(_ row: EmberToggleRowView, showDivider: Bool = true) {
     stack.addArrangedSubview(row)
+    pinFullWidth(row)
     if showDivider {
-      let div = NSView()
-      div.wantsLayer = true
-      div.layer?.backgroundColor = EmberColor.divider.cgColor
-      div.translatesAutoresizingMaskIntoConstraints = false
-      div.heightAnchor.constraint(equalToConstant: 1).isActive = true
-      stack.addArrangedSubview(div)
+      addDivider()
     }
+  }
+  func addRow(_ row: EmberBehaviorRowView, showDivider: Bool = true) {
+    stack.addArrangedSubview(row)
+    pinFullWidth(row)
+    if showDivider {
+      addDivider()
+    }
+  }
+  func addRow(_ row: NSView, showDivider: Bool = true) {
+    stack.addArrangedSubview(row)
+    pinFullWidth(row)
+    if showDivider {
+      addDivider()
+    }
+  }
+  private func addDivider() {
+    let div = NSView()
+    div.wantsLayer = true
+    div.layer?.backgroundColor = EmberColor.divider.cgColor
+    div.translatesAutoresizingMaskIntoConstraints = false
+    div.heightAnchor.constraint(equalToConstant: 1).isActive = true
+    stack.addArrangedSubview(div)
+    pinFullWidth(div)
   }
 }
