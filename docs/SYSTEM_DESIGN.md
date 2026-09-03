@@ -1,113 +1,124 @@
-# System design
+# System design (0.4.0)
 
-## Multi-display safety boundary
+## Version truth
 
-Project Ember enumerates active online displays through CoreGraphics and
-de-duplicates mirror followers. A target is compatible only when its gamma-table
-capacity is at least two samples and its complete table can be read.
+`EmberCore.AppVersion` (marketing 0.4.0, build 4, schema 2) is the single
+source of truth. Info.plist, artifact names, and fallback UI derive from it.
 
-Every target carries:
+## Topology reconciliation (replaces full restore/reapply)
 
-- its current `CGDirectDisplayID`;
-- a ColorSync display UUID;
-- vendor, model, serial, unit, and built-in markers as identity fallbacks;
-- gamma capacity and the exact captured table.
+`DisplayReconfigurationObserver` emits an event stream: affected
+`CGDirectDisplayID`, complete flags, begin/end transaction, monotonic local
+generation, timestamp. Flags are decoded for diagnostics and never discarded.
+`NSApplication.didChangeScreenParametersNotification` is a complementary
+main-thread settling signal; CoreGraphics flags remain authoritative.
 
-A current display ID is never trusted on its own. Writes first resolve the saved
-physical identity, then verify that the resolved target still matches. Legacy
-schema-v1 recovery may fall back to its captured ID or the built-in display only
-for the one-time migration path.
+Value types: `DisplayTopologySnapshot`, `DisplayTopologyEntry`,
+`DisplayReconfigurationEvent`, `DisplayReconciliationPlan`,
+`DisplayVerificationResult`. Snapshots key on stable identity (UUID, else
+vendor/model/serial/unit + built-in), not transient IDs, and track
+online/active/mirrored/gamma-compatible/built-in states.
 
-Activation order:
+Settling by generation (cancellable Swift concurrency, MainActor-owned):
 
-1. Attempt any older pending recovery that has become available.
-2. Enumerate and de-duplicate all active displays.
-3. Capture each compatible display independently.
-4. Capture verified hardware state for the Backlight Lock target, if selected.
-5. Atomically save one schema-v2 recovery record containing every baseline.
-6. Apply and read back the transformed gamma table on each target.
-7. Immediately restore and exclude any target that rejects verification.
-8. Apply and verify Backlight Lock only on its capability-approved target.
+1. Begin event: increment generation, mark reconciling, no restore.
+2. End: sample immediately, then after ~250 ms debounce.
+3. Reconcile when two consecutive identity snapshots match and no newer
+   generation arrived.
+4. Bound at 2 s; on timeout reconcile the latest safe snapshot with a
+   diagnostic warning.
+5. Every delayed task checks its captured generation before I/O or publish
+   (stale operations cannot win).
 
-At least one verified display is required for activation. A failure on one
-target does not block successful targets. Unsupported displays remain untouched
-and are reported in the control panel and diagnostics.
+While desired ON, per identity:
+
+- Still-online controlled: never restore or recapture; read back; leave
+  untouched within tolerance, else reapply from the saved immutable baseline.
+- Disconnected: remove from online set, retain journal entry unchanged as
+  pending, keep remaining displays on.
+- New with no entry: unique identity, capture baseline, capture hardware state
+  on verified built-in Backlight Lock targets, journal before mutation, apply
+  + verify, mark controlled only after verification. On apply failure, restore
+  and verify the captured baseline; retain entry if rollback unproven.
+- Reconnected pending: canonical saved baseline (never overwrite), derive
+  transform, apply + verify (no app-induced neutral flash). If desired off,
+  restore and remove only after verification.
+- Unsupported/ambiguous: untouched, accurately counted; ambiguity returns an
+  explicit recoverable error, never first-match.
+
+Post-reconciliation verification while desired on: immediate, ~0.5 s, ~2 s
+(generation-bound, cancellable; one bounded reapply on reset + re-verify).
+Sparse 30 s read-only health check with timer tolerance; bounded recovery on
+drift; 3 overrides in 60 s enter a truthful degraded attention state with
+Retry/Reset and identity/timing context.
+
+Test seams (`DisplayProtocols.swift`): enumerator, gamma, backlight, journal,
+settings, clock — only enough indirection for deterministic fakes.
 
 ## Color pipeline
 
-Warmth 0–82% maps through a CIE daylight approximation from 6500 K to 2000 K,
-converted from xyY to linear sRGB channel gains. The final 18% smoothly
-interpolates to red. That endpoint is called Pure Red because it is not a
-physically meaningful color temperature.
+Warmth 0–82% maps through a CIE daylight approximation from 6500 K to 2000 K
+(xyy → linear sRGB gains). Final 18% interpolates to red-channel-only Pure Red
+(not a color temperature). Software brightness multiplies transformed channels.
+Original tables are immutable; slider changes never compound. Gamma tables
+cannot mix channels into grayscale/E-Ink.
 
-Software brightness multiplies all three transformed gamma channels. Each
-display's original table remains immutable, so slider changes never compound
-and repeated restoration has zero mathematical drift.
+## Backlight Lock (built-in-only, reversible)
 
-CoreGraphics gamma tables map red, green, and blue independently. They cannot
-mix RGB luminance into true grayscale, which is why monochrome and E-Ink
-simulation are outside the safe 0.2 architecture.
-
-## Backlight Lock
-
-The app runtime-loads the macOS DisplayServices private framework and requires
-successful readback plus write symbols before enabling hardware control. On the
-tested setup this succeeds for the built-in panel and fails cleanly for the Dell
-HDMI display. Ember does not send external DDC/CI commands.
-
-For a supported display it saves hardware brightness and automatic-brightness
-state, disables automatic brightness, writes full panel brightness, verifies
-readback, and checks again once per second. Three consecutive failures stop the
-guard and trigger restoration. Sunrise can restore hardware while preserving
-the user's Backlight Lock preference for the next sunset.
+Runtime-loads DisplayServices; capability requires built-in identity plus
+read/write symbols. Captures hardware brightness + automatic-brightness only
+when reads succeed; changes automatic brightness only when captured.
+Preference (`settings.backlightLockEnabled`) is separate from engagement
+(engaged/unavailable/failed). Off/sunrise/quick-off/sleep/termination restore
+hardware but preserve preference; only explicit user-off or emergency reset
+clears it. Guard polls at 5 s (1 s tolerance), reads before writing, writes
+only on drift (<0.97 or ambient re-enabled), verifies after writes, retries
+unavailable targets during reconciliation. Copy never claims PWM elimination.
 
 ## Recovery and lifecycle
 
-The state machine models off, activating, active, restoring, suspended, and
-degraded states. The journal remains at:
+States: off, activating, active, reconciling, restoring, suspended, degraded.
+`DisplayStateMachine` owns transitions including degraded→sleep→suspended and
+topology-during-activation/restore; coordinator executes returned actions
+(verify/publish) rather than ignoring them.
 
-    ~/Library/Application Support/Project Ember/display-recovery-v1.json
+Journal at `~/Library/Application Support/Project Ember/display-recovery-v1.json`
+(schema v2 array; v1 migration preserved; future schemas rejected). Explicit
+`JournalLoadOutcome` (absent/loaded/future/corrupt/I-O). Corrupt journals are
+quarantined with a last-resort ColorSync reset and explicit attention — never
+treated as empty. Last-known-good backup updated atomically. Per-display
+`RestoreOutcome` (verified/pending/ambiguous/write-fail/readback/hardware
+failures); unsuccessful entries stay journaled. `restoreVerified` reads back
+within 0.004 (gamma) and verifies hardware when captured. ColorSync fallback
+prunes only entries actually present within tolerance. Safety invariants
+(journal-before-mutation, verified-restore-before-deletion, immutable baseline,
+no blanket restore, observed truth, pending-not-forgotten, ambiguity-no-mutation,
+built-in-only reversible backlight, generation binding, no silent fallback) are
+encoded in code comments and tests.
 
-The filename is retained for in-place compatibility; its current payload is
-schema v2 with an array of identity-matched display entries. The decoder accepts
-the original schema-v1 single-display shape.
+Disable/sleep/quit/manual reset restore every available entry; absent entries
+stay pending and retry before that display can be re-transformed.
 
-Disable, sleep, quit, and manual reset restore every available entry. An entry
-whose physical display is absent stays in the atomic journal and is retried
-before that display can receive another transform. Display reconfiguration
-restores the old configuration, waits for the CoreGraphics change to settle,
-then captures and reapplies to the new set. Exact per-display restoration is
-always attempted before the manual-reset ColorSync fallback.
+## Desired / observed / presentation
 
-The journal contains no screen pixels. It stores only gamma samples, optional
-hardware values, display identity, desired settings, timestamps, and app
-version.
+`EmberPresentation` (desired flag, operation state, observed-active bool,
+counts, attention, titles) is the single render source. Active requires ≥1
+verified transform on an intended online display. Pending-only uses calm
+truthful copy; real failures surface Retry/Reset.
 
 ## Sun schedule
 
-`SolarScheduleController` creates `CLLocationManager` on the main run loop and
-uses `requestLocation()` only. It never starts continuous or background
-tracking. A successful fix is rounded to 0.1° and stored locally with its
-timestamp. Permission revocation deletes that cache.
-
-Solar calculations implement the NOAA equation-of-time and declination model
-with the apparent-rise zenith of 90.833°. They use the autoupdating local time
-zone, including daylight-saving transitions. The calculator returns the current
-day/night state and searches forward for the next real event, so polar day and
-night do not receive invented boundaries.
-
-Enabling the schedule also requests Launch at login and immediately reconciles
-the filter to the Sun. A manual on/off action stores the requested state plus the
-next event time. The override survives relaunch and expires at that boundary.
-One-shot timers are rebuilt after location refresh, wake, system-clock changes,
-time-zone changes, and each solar event. A stale location is refreshed after 24
-hours; a cached coordinate remains usable during a transient Core Location
-failure.
+`SolarScheduleController` uses one-shot `requestLocation()` only, validates
+`location.timestamp` age (≤5 min), rounds to 0.1°, stores locally. Transition
+and retry timers are independent; cached-failure scheduling continues from
+cache plus a future retry; retry cancels only on fresh success or disable.
+Exposes schedule + authorization + refreshing + error for structured UI (no
+string parsing). Enabling also enables Launch at Login (explicit copy).
+Preference retained on transient failures; denied/restricted turns off with
+explanation. NOAA model, 90.833° zenith, local zone/DST, polar-safe forward
+search.
 
 ## Privacy and permissions
 
-The location purpose string is the only new protected-resource declaration.
-Project Ember has no networking code, background location mode, telemetry,
-analytics, account, or license service. Approximate coordinates never leave the
-Mac and are not classified as transmitted collected data in the privacy
-manifest.
+Only the location purpose string is declared. No networking, background
+location, telemetry, or accounts. Coordinates never leave the Mac.

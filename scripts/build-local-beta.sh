@@ -1,9 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 
+# Local ad-hoc build for development (0.4.0). Production signing/notarization
+# lives in scripts/build-production-release.sh.
 ROOT_DIR="${0:A:h:h}"
 WORKSPACE_DIR="${ROOT_DIR:h}"
-SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk"
+VERSION="0.4.0"
+SDK="$(xcrun --show-sdk-path 2>/dev/null || echo "")"
 BUILD_DIR="/private/tmp/ProjectEmberBuild-${UID}"
 CACHE_DIR="/private/tmp/ProjectEmberSwiftPM-${UID}"
 OUTPUT_DIR="${WORKSPACE_DIR}/outputs"
@@ -11,21 +14,17 @@ APP_PATH="${OUTPUT_DIR}/Project Ember.app"
 CONTENTS="${APP_PATH}/Contents"
 MACOS_DIR="${CONTENTS}/MacOS"
 RESOURCES_DIR="${CONTENTS}/Resources"
-DMG_STAGE="${WORKSPACE_DIR}/work/ProjectEmberDMG-0.3.0"
-DMG_PATH="${OUTPUT_DIR}/Project-Ember-0.3.0-local-beta.dmg"
+DMG_STAGE="${WORKSPACE_DIR}/work/ProjectEmberDMG-${VERSION}"
+DMG_PATH="${OUTPUT_DIR}/Project-Ember-${VERSION}-local-beta.dmg"
 
-if [[ ! -d "${SDK}" ]]; then
-    # Try current Xcode SDK as fallback
-    FALLBACK_SDK="$(xcrun --show-sdk-path 2>/dev/null || echo "")"
-    if [[ -n "${FALLBACK_SDK}" && -d "${FALLBACK_SDK}" ]]; then
-        SDK="${FALLBACK_SDK}"
-        print "Using fallback SDK: ${SDK}"
-    else
-        print -u2 "Required SDK not found: ${SDK}"
-        exit 1
-    fi
+if [[ -z "${SDK}" || ! -d "${SDK}" ]]; then
+    print -u2 "Could not discover macOS SDK via xcrun."
+    exit 1
 fi
+print "Using SDK: ${SDK}"
 
+# Clean staging before use.
+rm -rf "${DMG_STAGE}" "${APP_PATH}"
 mkdir -p "${BUILD_DIR}" "${CACHE_DIR}/cache" "${CACHE_DIR}/config" "${CACHE_DIR}/security"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${OUTPUT_DIR}" "${DMG_STAGE}"
 
@@ -33,6 +32,7 @@ export SDKROOT="${SDK}"
 export CLANG_MODULE_CACHE_PATH="${CACHE_DIR}/clang"
 export SWIFT_MODULE_CACHE_PATH="${CACHE_DIR}/swift"
 
+# Apple-Silicon product decision: arm64 only (documented in README/CHANGELOG).
 swift build \
     --disable-sandbox \
     --jobs 1 \
@@ -44,6 +44,7 @@ swift build \
     --triple arm64-apple-macosx14.0 \
     --build-path "${BUILD_DIR}"
 
+swift test --disable-sandbox --skip-build 2>/dev/null || swift test --disable-sandbox
 "${BUILD_DIR}/arm64-apple-macosx/release/EmberCoreChecks"
 
 /usr/bin/install -m 755 \
@@ -82,3 +83,4 @@ print "  ${DMG_PATH}"
 print ""
 print "This beta is ad-hoc signed for local testing. Developer ID signing and"
 print "notarization require an active Apple Developer Program membership."
+print "See scripts/build-production-release.sh for the public release path."

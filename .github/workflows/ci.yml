@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app || true; xcrun --show-sdk-path
+      - name: Debug build
+        run: swift build --disable-sandbox
+      - name: Release build
+        run: swift build --disable-sandbox -c release
+      - name: Unit tests (no hardware mutation)
+        run: swift test --disable-sandbox
+      - name: Core checks (fakes only)
+        run: swift run --disable-sandbox EmberCoreChecks
+      - name: Validate plists and privacy manifest
+        run: |
+          /usr/bin/plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy
+          /usr/bin/plutil -p Resources/Info.plist | grep -q "0.4.0"
+          /usr/bin/plutil -p Resources/PrivacyInfo.xcprivacy
