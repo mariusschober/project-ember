@@ -75,8 +75,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       textProvider: { [weak coordinator] in
         coordinator?.diagnostics.formattedText() ?? "No diagnostics available."
       },
+      exportProvider: { [weak coordinator] in
+        coordinator?.exportDiagnostics() ?? "No diagnostics available."
+      },
       resetHandler: { [weak coordinator] in
         coordinator?.resetDisplayNow()
+      },
+      retryHandler: { [weak coordinator] in
+        coordinator?.retryNow()
       }
     )
   }
@@ -118,10 +124,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     guard let button = statusItem.button else { return }
     button.target = self
-    button.action = #selector(togglePopover)
+    button.action = #selector(statusItemClicked)
+    // Receive left and right mouse-up separately for quick-toggle behavior.
+    button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     button.imagePosition = .imageOnly
     button.toolTip = "Project Ember"
     button.setAccessibilityLabel("Project Ember display controls")
+    button.setAccessibilityHelp("Left click follows Menu bar click setting. Right click always opens controls.")
   }
 
   private func setupLifecycleObservers() {
@@ -162,47 +171,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { coordinator?.systemTimeChanged() }
       }
     )
+    // Complementary main-thread settling signal; CoreGraphics flags remain the
+    // source of detailed topology information.
+    systemObservers.append(
+      notificationCenter.addObserver(
+        forName: NSApplication.didChangeScreenParametersNotification,
+        object: nil,
+        queue: .main
+      ) { [weak coordinator] _ in
+        MainActor.assumeIsolated { coordinator?.displayConfigurationChanged() }
+      }
+    )
 
-    displayObserver = DisplayReconfigurationObserver { [weak coordinator] in
-      coordinator?.displayConfigurationChanged()
+    displayObserver = DisplayReconfigurationObserver { [weak coordinator] event in
+      coordinator?.handleDisplayEvent(
+        displayID: event.displayID, flags: event.flags, isBegin: event.isBeginTransaction)
     }
   }
+
+  // Cached status images: avoid redrawing on every snapshot/slider event.
+  private lazy var cachedInactiveImage: NSImage = EmberDotIcon.inactiveImage()
+  private lazy var cachedActiveImage: NSImage = EmberDotIcon.activeImage()
+  private lazy var cachedDegradedImage: NSImage = EmberDotIcon.degradedImage()
 
   private func renderStatusItem(_ snapshot: EmberSnapshot) {
     guard let button = statusItem.button else { return }
     let image: NSImage
     let description: String
-    // Use runtimeState directly; string-based check was brittle and duplicated
-    // logic already handled in DisplayCoordinator snapshot for pending restores.
+    let value: String
+    // Observed truth drives the UI: active only when verified.
+    let isActive = snapshot.isObservedActive && snapshot.runtimeState == .active
+    let needsAttention = snapshot.attentionTitle != nil
+      && snapshot.statusTitle == "Needs attention"
     switch snapshot.runtimeState {
-    case .active:
-      image = EmberDotIcon.activeImage()
+    case .active where isActive:
+      image = cachedActiveImage
       description = "Project Ember active"
-    case .degraded:
-      // Degraded with pending-only (disconnected) is rendered as off in snapshot,
-      // so any remaining degraded is a genuine attention state.
-      image = EmberDotIcon.degradedImage()
+      value = "Active on \(snapshot.verifiedDisplayCount) displays"
+    case .degraded where needsAttention:
+      image = cachedDegradedImage
       description = "Project Ember needs attention"
-    case .activating, .restoring:
-      image = EmberDotIcon.inactiveImage()
+      value = snapshot.attentionMessage ?? "Needs attention"
+    case .activating, .restoring, .reconciling:
+      image = cachedInactiveImage
       description = "Project Ember working"
+      value = snapshot.statusDetail
     default:
-      // Off / suspended — check title only for the generic "Needs attention" that
-      // may still come from .off with lastError (not pending). Prefer runtimeState
-      // but keep fallback for .off degraded-style lastError.
-      if snapshot.statusTitle == "Needs attention" {
-        image = EmberDotIcon.degradedImage()
+      if needsAttention {
+        image = cachedDegradedImage
         description = "Project Ember needs attention"
+        value = snapshot.attentionMessage ?? "Needs attention"
+      } else if isActive {
+        image = cachedActiveImage
+        description = "Project Ember active"
+        value = "Active"
       } else {
-        image = EmberDotIcon.inactiveImage()
-        description = "Project Ember ready"
+        image = cachedInactiveImage
+        description = snapshot.statusTitle == "Paused for sleep"
+          ? "Project Ember paused for sleep" : "Project Ember ready"
+        value = snapshot.statusDetail
       }
     }
     button.image = image
     button.image?.isTemplate = false
-    // Ensure crisp on Retina
     button.image?.size = NSSize(width: 16, height: 16)
     button.toolTip = description
+    button.setAccessibilityLabel(description)
+    button.setAccessibilityValue(value)
+    button.setAccessibilityHelp(
+      "Left click: \(snapshot.settings.menuBarPrimaryAction == .toggleEmber ? "toggle Ember" : "open controls"). Right click always opens controls."
+    )
+  }
+
+  @objc private func statusItemClicked() {
+    guard let event = NSApp.currentEvent else {
+      togglePopover()
+      return
+    }
+    // Right-click / secondary / two-finger / Control-click always opens controls.
+    if event.type == .rightMouseUp {
+      openControls()
+      return
+    }
+    if event.type == .leftMouseUp, event.modifierFlags.contains(.control) {
+      openControls()
+      return
+    }
+    // Left click routes according to preference.
+    let result = coordinator.handlePrimaryClick()
+    switch result {
+    case .openedControls:
+      togglePopover()
+    case .toggledOn, .toggledOff:
+      NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+      // Update icon immediately to working; verification publishes final state.
+      renderStatusItem(coordinator.currentSnapshot())
+    case .ignoredBusy:
+      break
+    }
+  }
+
+  private func openControls() {
+    if visualQAMode {
+      qaWindow?.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      return
+    }
+    if !popover.isShown { showPopover() }
   }
 
   @objc private func togglePopover() {
@@ -214,7 +289,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if popover.isShown {
       popover.performClose(nil)
     } else {
-      showPopover()
+      // Fallback path (e.g., keyboard activation): respect primary action.
+      let result = coordinator.handlePrimaryClick()
+      if result == .openedControls || result == .ignoredBusy {
+        if result == .openedControls { showPopover() }
+      } else {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        renderStatusItem(coordinator.currentSnapshot())
+      }
     }
   }
 
@@ -272,22 +354,28 @@ private func emberDisplayReconfigurationCallback(
   _ flags: CGDisplayChangeSummaryFlags,
   _ userInfo: UnsafeMutableRawPointer?
 ) {
-  guard !flags.contains(.beginConfigurationFlag), let userInfo else { return }
-  // Observer is guaranteed to outlive registration (owned by AppDelegate for the
-  // entire process lifetime). Use unretained to avoid retain/release in the
-  // callback which runs on an arbitrary thread.
+  guard let userInfo else { return }
+  // Preserve affected display, complete flags, and begin/end transaction state.
+  // Multiple callbacks may fire for one physical action; treat as event stream.
   let observer = Unmanaged<DisplayReconfigurationObserver>
     .fromOpaque(userInfo)
     .takeUnretainedValue()
+  let rawFlags = flags.rawValue
+  let isBegin = flags.contains(.beginConfigurationFlag)
   Task { @MainActor in
-    observer.notify()
+    observer.notify(displayID: display, flags: rawFlags, isBegin: isBegin)
   }
 }
 
+/// Event-stream observer: emits affected display + flags + begin/end + local
+/// generation + timestamp. Flags are never discarded; readable decoding lives
+/// in EmberCore.DisplayReconfigurationEvent.
 final class DisplayReconfigurationObserver: @unchecked Sendable {
-  private let handler: @MainActor @Sendable () -> Void
+  private let handler: @MainActor @Sendable (DisplayObserverEvent) -> Void
+  private var generation: UInt64 = 0
+  private let lock = NSLock()
 
-  init(handler: @escaping @MainActor @Sendable () -> Void) {
+  init(handler: @escaping @MainActor @Sendable (DisplayObserverEvent) -> Void) {
     self.handler = handler
     CGDisplayRegisterReconfigurationCallback(
       emberDisplayReconfigurationCallback,
@@ -303,7 +391,21 @@ final class DisplayReconfigurationObserver: @unchecked Sendable {
   }
 
   @MainActor
-  func notify() {
-    handler()
+  func notify(displayID: CGDirectDisplayID, flags: UInt32, isBegin: Bool) {
+    lock.lock()
+    generation += 1
+    let current = generation
+    lock.unlock()
+    handler(DisplayObserverEvent(
+      displayID: displayID, flags: flags, isBeginTransaction: isBegin,
+      generation: current, timestamp: Date()))
   }
+}
+
+struct DisplayObserverEvent: Sendable {
+  let displayID: UInt32
+  let flags: UInt32
+  let isBeginTransaction: Bool
+  let generation: UInt64
+  let timestamp: Date
 }

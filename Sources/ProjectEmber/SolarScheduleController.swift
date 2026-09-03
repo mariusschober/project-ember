@@ -179,10 +179,10 @@ final class SolarScheduleController: NSObject, @preconcurrency CLLocationManager
   }
 
   private func scheduleTransition(for event: SolarEvent?) {
+    // Independent from the location-retry timer: scheduling a solar transition
+    // must not cancel a pending location retry.
     transitionTimer?.invalidate()
     transitionTimer = nil
-    retryTimer?.invalidate()
-    retryTimer = nil
     guard let event else { return }
     let timer = Timer(fire: event.date.addingTimeInterval(0.5), interval: 0, repeats: false) {
       [weak self] _ in
@@ -268,9 +268,23 @@ final class SolarScheduleController: NSObject, @preconcurrency CLLocationManager
   }
 
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-    guard enabled,
-      let location = locations.last(where: { $0.horizontalAccuracy >= 0 })
-    else { return }
+    guard enabled else { return }
+    guard let location = locations.last(where: { $0.horizontalAccuracy >= 0 }) else { return }
+    // Validate Core Location timestamp: reject stale cached fixes instead of
+    // stamping them as newly captured at now().
+    let age = now().timeIntervalSince(location.timestamp)
+    guard age >= -60, age <= 5 * 60 else {
+      // Stale fix: keep existing schedule, ensure a retry is pending.
+      scheduleLocationRetry()
+      publish(
+        authorization: .authorized,
+        schedule: snapshot.schedule,
+        locationUpdatedAt: snapshot.locationUpdatedAt,
+        isRefreshing: false,
+        errorMessage: snapshot.errorMessage ?? "Waiting for a fresh location fix."
+      )
+      return
+    }
     let coordinate = SolarCoordinate(
       latitude: location.coordinate.latitude,
       longitude: location.coordinate.longitude
@@ -278,6 +292,9 @@ final class SolarScheduleController: NSObject, @preconcurrency CLLocationManager
     let cached = CachedSolarLocation(coordinate: coordinate, capturedAt: now())
     do {
       try locationStore.save(cached)
+      // Cancel retry only after a successful acceptably fresh update.
+      retryTimer?.invalidate()
+      retryTimer = nil
       reconcile(using: cached)
     } catch {
       publish(
@@ -293,6 +310,7 @@ final class SolarScheduleController: NSObject, @preconcurrency CLLocationManager
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
     guard enabled else { return }
     if let cached = locationStore.load() {
+      // Continue scheduling from the cache AND schedule a future retry.
       reconcile(using: cached)
       publish(
         authorization: .authorized,
@@ -301,6 +319,7 @@ final class SolarScheduleController: NSObject, @preconcurrency CLLocationManager
         isRefreshing: false,
         errorMessage: "Using the last saved approximate location."
       )
+      scheduleLocationRetry()
     } else {
       publish(
         authorization: Self.authorization(from: manager.authorizationStatus),
