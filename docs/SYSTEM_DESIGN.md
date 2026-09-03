@@ -122,3 +122,23 @@ search.
 
 Only the location purpose string is declared. No networking, background
 location, telemetry, or accounts. Coordinates never leave the Mac.
+
+## Panel layout (deterministic, no scroll)
+
+The control panel is a fitted 390pt popover with no scroll view. Layout rules
+that keep it deterministic:
+
+- Static wrapping widths (`EmberMetrics.rowTextWidth` 244, `heroTextWidth`
+  198). Deriving wrap widths from bounds at layout time creates a width↔wrap
+  feedback loop that staggers rows, stretches icons, and grows the window.
+- Settings-card rows pin full card width; toggle/behavior/slider icons share
+  one grid (`rowLeadingInset`, `rowIconWidth`, `rowIconTextGap`).
+- Row icons live in fixed-size boxes; glyphs letterbox inside instead of
+  fighting symbol aspect constraints.
+- The hero orb is the panel's on/off control (hover previews the result with
+  a capped mix, hand cursor, tooltips, focus ring, VoiceOver button
+  semantics); the header is static branding. A subtle power glyph marks the
+  orb; it never pulses and ignores clicks.
+- Footer fits by construction: full claim sentence, author link
+  (https://mariusschober.com/), single BETA badge. Footers wider than budget
+  grow the whole window — measure after copy changes.

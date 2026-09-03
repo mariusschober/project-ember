@@ -33,8 +33,14 @@ UUID, built-in, gamma capacity/readability, hardware capability. No writes.
 
 `--system-self-test`, `--lifecycle-self-test`,
 `--prepare-crash-recovery-test` + `--recover-only` as in prior releases.
-CI runs only fakes. Manual hardware commands are documented in release notes;
-unexecuted runs are marked as such in the final report.
+CI runs only fakes.
+
+Executed 2026-09-03 (MacBook Pro M1 Pro, macOS 26.6.2, built-in Liquid Retina
+XDR + Dell S2419H): probe pass (2/2 compatible, 1024 samples, backlight on
+built-in only); system self-test pass (apply/restore, Pure Red, Backlight
+Lock, auto-brightness restore, journal cleared); lifecycle pass (live
+updates, guard, reconfig, sleep/wake/termination); crash prepare + recover
+pass (startup recovery verified, journal cleared).
 
 ## Manual hardware acceptance matrix (required for 1.0, not claimed for 0.4.0)
 

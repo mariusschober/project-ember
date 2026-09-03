@@ -54,7 +54,7 @@ Branch: `release/0.4.0`. Version truth: `Sources/EmberCore/AppVersion.swift`.
 | Requirement | Code change | Automated test | Manual verification | Limitation |
 |---|---|---|---|---|
 | Sun row title alignment; grow downward; identical baselines; no fixed widths | `EmberToggleRowView` aligns icon/switch to `titleLabel.centerY`; removes 244pt width + 81pt height | Layout QA snapshots (manual) | Matrix #11; row states | Snapshots not automated |
-| Real scroll view, pinned footer | `ControlPanel` embeds `scrollContent` in `NSScrollView` (autohides) | — | Large-text/permission-error QA | — |
+| Fitted no-scroll panel, pinned footer | `ControlPanel` uses a plain fitted container (390pt, no `NSScrollView`); copy/row heights budgeted so the permission-error state fits | Snapshot QA in off/active/permission states | Large-text QA still manual | A scroll view was prototyped first and removed — it hid overflow instead of fixing it |
 | Pill: clear all on custom, breathing room, contrast, truthful animated, no dead dividers, hover/focus/a11y | `EmberPillControl` layout/custom reset, 1pt inset, contrast border, `updateAccessibility`, arrow keys, radio-group | `customClearsPreset` (preset helper) | Keyboard/VO QA | Dividers intentionally omitted |
 | Switch: single path, disabled guard, mouse-up-inside, press action, full Reduce Motion | `EmberSwitch` `_isOn` + `updateVisual`, `pressedInside`, `accessibilityPerformPress`, Reduce Motion all paths | — | Keyboard/VO QA | — |
 | Slider: fixed three-stop gradient clipped to fill; standard keyboard/focus/VO; immediate text; coalesced writes + 150 ms settings/journal debounce + flush | `EmberSliderCell.drawBar` three-stop over full track clipped to fill; `changeWarmth/Brightness` immediate text; coordinator 50 ms gamma + 150 ms persist debounce + `flushPendingSettings` | — | Drag-while-unplug matrix #4 | — |
@@ -75,7 +75,7 @@ Structured callback/generation/snapshot/plan/journal/delta/verification/backligh
 
 ## Workstream 9 — Automated tests
 
-`EmberCoreChecks` retained (59 checks) plus `EmberCoreTests` (36 Swift Testing tests, `swift test` in CI). Coverage maps above. CI uses fakes only; hardware-mutating tests are manual commands marked unexecuted. Limitation: full coordinator I/O still requires hardware.
+`EmberCoreChecks` retained (59 checks) plus `EmberCoreTests` (36 Swift Testing tests, `swift test` in CI). Coverage maps above. CI uses fakes only; reversible hardware self-tests executed 2026-09-03 (see `RELEASE_NOTES.md`); the full acceptance matrix is still pending. Limitation: full coordinator I/O still requires hardware.
 
 ## Workstream 10 — Release engineering
 
@@ -89,4 +89,18 @@ Structured callback/generation/snapshot/plan/journal/delta/verification/backligh
 
 ## Manual hardware acceptance matrix
 
-Not claimed as passed. See `RELEASE_NOTES.md` + final report: exact manual commands provided, marked unexecuted on this build machine. Required Mac model/OS/connection/display/HDR/True Tone/Night Shift/result fields must be recorded when run.
+Reversible self-tests passed 2026-09-03 (see `RELEASE_NOTES.md`); the full
+matrix (20× hot-plug, a11y pass, 8-hour idle, signing/notarization) is not
+claimed as passed. Required Mac model/OS/connection/display/HDR/True Tone/
+Night Shift/result fields must be recorded when run.
+
+## UI follow-ups (post-0.4.0 prompt, same branch)
+
+| Change | Code | Verification |
+|---|---|---|
+| Hero orb is the on/off control; header power button + ON/OFF label removed | `EmberOrbView` button behavior + `EmberHeaderView` static branding | Snapshot off/active; manual hover/click/keyboard/VO |
+| Subtle power glyph on orb (state-aware alpha, no pulse, ignores clicks) | `EmberOrbView.glyphView` driven by `applyAppearance` | Snapshot off/active |
+| Deterministic panel layout: full-width rows, static wrap widths, icon boxes, required hugging | `EmberSettingsCard.pinFullWidth`, `EmberMetrics.rowTextWidth/heroTextWidth`, icon boxes, footer fit | Frame dumps (window back to 390), snapshots |
+| Pill highlight constraint-pinned to segment (3pt insets) | `PillIndicatorView` + `remakeIndicatorConstraints` | Snapshots Neutral/Evening/Pure Red/custom |
+| Footer author link (mariusschober.com), single BETA badge | `EmberFooterBarView.authorButton` | Snapshot; manual click |
+| Header tagline shortened to fit one line at 390pt | `EmberHeaderView.subtitleLabel` | Snapshot (owner review noted in code) |

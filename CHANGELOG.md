@@ -28,10 +28,15 @@ artifacts.
 - Sun schedule hardening: location-age validation, independent
   transition/retry timers, cached-failure retry, structured solar presentation,
   and retained preference on transient failures.
-- AppKit refinements: real scroll view, title-aligned toggle rows, fixed
-  three-stop slider gradient, consolidated switch path, cached status images,
-  Reduce Motion/Transparency/Contrast handling, contrast-raised text tokens,
-  and mechanism-based copy.
+- AppKit refinements: fitted no-scroll panel (fixed 390pt width, no scroll
+  view), hero orb as the panel on/off control with capped hover preview and
+  subtle power glyph, full-width settings card rows on a shared grid,
+  constraint-pinned preset highlight, fixed three-stop slider gradient with
+  fully visible thumbs at 0%/100%, consolidated switch path, cached status
+  images, Reduce Motion/Transparency/Contrast handling, contrast-raised text
+  tokens, footer author link (mariusschober.com), and mechanism-based copy.
+  Layout is deterministic: static wrap widths, explicit row widths, and no
+  width↔wrap feedback loops (see `docs/SYSTEM_DESIGN.md`).
 - Standard `EmberCoreTests` suite (36 tests) plus `EmberCoreChecks` smoke checks;
   CI on macOS runners; local ad-hoc script plus production
   sign/notarize/staple/verify script.

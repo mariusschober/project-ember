@@ -27,6 +27,8 @@ hardware plus Developer ID-signed, notarized public artifacts.
   (Copy/Export, sanitized identifiers), custom-drawn menu-bar interface
 - Menu-bar click behavior: Open Controls (default) or Toggle Ember;
   right-click always opens controls
+- Single-view control panel (fitted, no scrolling): click the hero orb to turn
+  Ember on/off; footer credit links to the author's website
 
 The filter and Sun schedule are off on a fresh installation. Project Ember does
 not need screen recording, accessibility, camera, microphone, or network
@@ -47,7 +49,7 @@ removed or compiled out).
    Signed/notarized builds open normally.
 4. Click the menu-bar indicator.
 
-The first display mutation happens only after **Turn Ember On** is clicked or
+The first display mutation happens only after the hero orb is clicked on or
 after the user explicitly enables Sun schedule and the current time is after
 sunset. A newly connected external display may show its own hardware output
 before macOS exposes a writable target; Ember applies promptly once

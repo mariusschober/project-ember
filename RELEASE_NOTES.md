@@ -16,27 +16,35 @@ hardware acceptance matrix plus Developer ID-signed, notarized artifacts.
 - Menu-bar click behavior (Open Controls default; Toggle Ember optional;
   right-click always opens controls).
 - Sun schedule hardening and structured solar presentation.
-- AppKit refinements, contrast/accessibility fixes, mechanism-based copy.
+- AppKit refinements: fitted no-scroll panel, hero orb on/off control with
+  hover preview, full-width settings rows, constraint-pinned preset highlight,
+  contrast/accessibility fixes, footer author link, mechanism-based copy.
 - `EmberCoreTests` (36 tests) + `EmberCoreChecks`; CI; local + production
   build scripts.
 - Privacy: on-device approximate location/settings; no analytics/networking.
 
-## Manual hardware verification (this release)
+## Hardware verification (this release)
 
-No hardware-mutating self-tests were run in CI (fakes only). Reversible
-physical tests require an explicitly available test Mac with a safe recovery
-path. Exact manual commands:
+Reversible physical tests were executed 2026-09-03 on MacBook Pro (M1 Pro,
+macOS 26.6.2) with built-in Liquid Retina XDR + Dell S2419H external:
 
 ```
-ProjectEmber --system-probe
-ProjectEmber --system-self-test        # reversible; journaled, verified, restored
-ProjectEmber --lifecycle-self-test     # live updates, guard, reconfig, sleep/wake
+ProjectEmber --system-probe               # pass: 2/2 compatible, 1024 samples,
+                                          # backlight control on built-in only
+ProjectEmber --system-self-test           # pass: gamma apply/restore, Pure Red,
+                                          # Backlight Lock, auto-brightness restore,
+                                          # journal cleared
+ProjectEmber --lifecycle-self-test        # pass: live updates, backlight guard,
+                                          # reconfig, sleep/wake/termination restores
 ProjectEmber --prepare-crash-recovery-test && ProjectEmber --recover-only
+                                          # pass: startup recovery verified,
+                                          # journal cleared
 ```
 
-Status on this build machine: **unexecuted** (no test Mac was explicitly made
-available during implementation). Do not claim the acceptance matrix passed.
-See the final engineering report for what was and was not verified.
+Not performed: the full acceptance matrix (20× HDMI/USB-C hot-plug cycles,
+VoiceOver/keyboard/a11y pass, 8-hour idle observation, etc.). Do not claim
+1.0 readiness until that matrix passes on real hardware plus Developer ID
+signing/notarization.
 
 ## Known distribution limitation
 
