@@ -23,11 +23,14 @@ enum EmberColor {
   static let surfaceHeroActiveFrom = NSColor(calibratedRed: 0.36, green: 0.18, blue: 0.14, alpha: 1.0)
   static let surfaceHeroActiveTo = NSColor(calibratedRed: 0.24, green: 0.13, blue: 0.11, alpha: 1.0)
 
-  // Text
-  static let textPrimary = NSColor(calibratedRed: 0.95, green: 0.93, blue: 0.92, alpha: 1.0)
-  static let textSecondary = NSColor(calibratedRed: 0.71, green: 0.68, blue: 0.66, alpha: 1.0) // #B5ADA9
-  static let textTertiary = NSColor(calibratedRed: 0.52, green: 0.50, blue: 0.50, alpha: 1.0)
-  static let textMuted = NSColor(calibratedRed: 0.43, green: 0.41, blue: 0.40, alpha: 1.0)
+  // Text — all below 18pt meet ≥4.5:1 on card surface in composited state.
+  // Hierarchy retained with brighter muted/tertiary than 0.3.0.
+  static let textPrimary = NSColor(calibratedRed: 0.96, green: 0.94, blue: 0.93, alpha: 1.0)
+  static let textSecondary = NSColor(calibratedRed: 0.82, green: 0.79, blue: 0.77, alpha: 1.0)
+  static let textTertiary = NSColor(calibratedRed: 0.70, green: 0.68, blue: 0.67, alpha: 1.0)
+  static let textMuted = NSColor(calibratedRed: 0.62, green: 0.60, blue: 0.59, alpha: 1.0)
+  // Opaque fallback when Reduce Transparency is enabled (replaces HUD/vibrancy).
+  static let surfaceOpaque = NSColor(calibratedRed: 0.13, green: 0.12, blue: 0.12, alpha: 1.0)
 
   // Borders / dividers
   static let borderSubtle = NSColor(calibratedWhite: 1.0, alpha: 0.07)

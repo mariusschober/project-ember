@@ -137,9 +137,16 @@ final class EmberPillControl: NSView {
     stackView?.layoutSubtreeIfNeeded()
     container.layoutSubtreeIfNeeded()
     container.layer?.cornerRadius = container.bounds.height / 2
+    // Selected background breathing room: 5-6pt outer inset is provided by the
+    // stack 3pt padding + indicator inset; add 1-2pt internal inset via frame.
     // Position indicator
     guard selectedSegment >= 0, selectedSegment < buttons.count else {
       indicator.isHidden = true
+      // Custom warmth: reset ALL labels to unselected style (no stale white/semibold).
+      for b in buttons {
+        b.contentTintColor = EmberColor.textSecondary
+        b.font = EmberFont.pill()
+      }
       return
     }
     indicator.isHidden = false
@@ -151,7 +158,9 @@ final class EmberPillControl: NSView {
       return
     }
     let frame = container.convert(btn.frame, from: btn.superview)
-    let target = NSRect(x: frame.minX, y: frame.minY, width: frame.width, height: frame.height)
+    // 5-6pt outer breathing room + 1pt internal inset so fill never touches container.
+    let target = NSRect(
+      x: frame.minX + 1, y: frame.minY + 1, width: frame.width - 2, height: frame.height - 2)
     indicator.frame = target
     if let grad = indicator.layer?.sublayers?.first(where: { $0.name == "indicatorGrad" }) {
       grad.frame = indicator.bounds
@@ -163,25 +172,53 @@ final class EmberPillControl: NSView {
     }
     indicator.layer?.cornerRadius = indicator.bounds.height/2
 
-    // Update button colors
+    // Update button colors — Increase Contrast: keep white + semibold + indicator
+    // border so selected state never relies on color alone.
     for (idx, b) in buttons.enumerated() {
       let selected = idx == selectedSegment
       b.contentTintColor = selected ? .white : EmberColor.textSecondary
       b.font = selected ? EmberFont.pillSelected() : EmberFont.pill()
       b.alphaValue = 1
     }
+    if NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast {
+      indicator.layer?.borderWidth = 1
+      indicator.layer?.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
+    } else {
+      indicator.layer?.borderWidth = 0
+    }
     // Dim dividers when selection covers? keep subtle
     container.layer?.borderColor = EmberColor.borderSubtle.cgColor
   }
 
   func setSelectedSegment(_ index: Int, animated: Bool) {
-    guard index != selectedSegment else { return }
-    if !animated {
+    guard index != selectedSegment else {
+      // Still refresh layout so custom (-1) clears stale highlight.
+      if index == -1 { needsLayout = true; layout() }
+      return
+    }
+    // Honor animated truthfully: suppress implicit animations when false,
+    // including Reduce Motion.
+    let shouldAnimate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    if !shouldAnimate {
+      NSAnimationContext.beginGrouping()
       NSAnimationContext.current.duration = 0
     }
     selectedSegment = index
-    if !animated {
-      layout()
+    layout()
+    updateAccessibility(index)
+    if !shouldAnimate {
+      NSAnimationContext.endGrouping()
+    }
+  }
+
+  private func updateAccessibility(_ index: Int) {
+    setAccessibilityRole(.radioGroup)
+    setAccessibilityLabel("Color preset")
+    let names = titles
+    if index >= 0, index < names.count {
+      setAccessibilityValue(names[index])
+    } else {
+      setAccessibilityValue("Custom warmth")
     }
   }
 
@@ -196,13 +233,34 @@ final class EmberPillControl: NSView {
   @objc private func tap(_ sender: NSButton) {
     let idx = sender.tag
     guard idx != selectedSegment else { return }
+    guard isEnabled else { return }
     selectedSegment = idx
+    layout()
+    updateAccessibility(idx)
     // send action to target if set, or via onSelect
     if let target = target, let action = action {
       NSApp.sendAction(action, to: target, from: self)
     }
     onSelect?(idx)
   }
+
+  override var acceptsFirstResponder: Bool { true }
+  override func becomeFirstResponder() -> Bool { true }
+  override func keyDown(with event: NSEvent) {
+    // Arrow-key navigation for segmented/radio-group semantics.
+    if event.keyCode == 123 || event.keyCode == 124 {
+      let delta = event.keyCode == 124 ? 1 : -1
+      let count = buttons.count
+      guard count > 0 else { super.keyDown(with: event); return }
+      let next = ((selectedSegment < 0 ? (delta > 0 ? -1 : 0) : selectedSegment) + delta + count) % count
+      setSelectedSegment(next, animated: true)
+      tap(buttons[next])
+      return
+    }
+    super.keyDown(with: event)
+  }
+
+  override func accessibilityRole() -> NSAccessibility.Role? { .radioGroup }
 
   // MARK: - Target/Action compatibility
   weak var target: AnyObject?

@@ -16,15 +16,17 @@ final class ControlPanelViewController: NSViewController {
   private let brightnessSlider = EmberSlider(variant: .brightness, value: 75, minValue: 10, maxValue: 100, target: nil, action: nil)
   private let brightnessValue = NSTextField(labelWithString: "75%")
 
-  private let backlightRow = EmberToggleRowView(iconSymbol: "shield.lefthalf.filled", title: "Backlight Lock", detail: "Keeps the panel backlight at full power while Ember dims in software.")
+  private let backlightRow = EmberToggleRowView(iconSymbol: "shield.lefthalf.filled", title: "Backlight Lock", detail: "Keeps a compatible built-in display at full hardware brightness while Ember dims in software.")
   private let sunScheduleRow = EmberToggleRowView(iconSymbol: "sun.horizon", title: "Sun schedule", detail: "Turns Ember on at sunset and restores it at sunrise.")
   private let launchRow = EmberToggleRowView(iconSymbol: "paperplane.fill", title: "Launch at login", detail: "Apply your saved preference after sign-in.")
+  private let behaviorRow = EmberBehaviorRowView()
   private let settingsCard = EmberSettingsCard()
 
   private let footerActions = EmberFooterActionsView()
   private let footerBar = EmberFooterBarView()
 
   private let scrollContent = NSStackView()
+  private var scrollView: NSScrollView?
 
   init(coordinator: DisplayCoordinator, showDiagnostics: @escaping () -> Void) {
     self.coordinator = coordinator
@@ -37,12 +39,21 @@ final class ControlPanelViewController: NSViewController {
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   override func loadView() {
-    // Background – dark vibrancy with subtle warm wash
-    let background = NSVisualEffectView()
-    background.appearance = NSAppearance(named: .darkAqua)
-    background.material = .hudWindow
-    background.blendingMode = .withinWindow
-    background.state = .active
+    // Background – dark vibrancy, opaque when Reduce Transparency is enabled.
+    let background: NSView
+    if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+      let opaque = NSView()
+      opaque.wantsLayer = true
+      opaque.layer?.backgroundColor = EmberColor.surfaceOpaque.cgColor
+      background = opaque
+    } else {
+      let vibrancy = NSVisualEffectView()
+      vibrancy.appearance = NSAppearance(named: .darkAqua)
+      vibrancy.material = .hudWindow
+      vibrancy.blendingMode = .withinWindow
+      vibrancy.state = .active
+      background = vibrancy
+    }
     view = background
     let wash = NSView()
     wash.wantsLayer = true
@@ -74,14 +85,14 @@ final class ControlPanelViewController: NSViewController {
     pillControl.setAccessibilityLabel("Color preset")
     pillControl.translatesAutoresizingMaskIntoConstraints = false
 
-    // Sliders
+    // Sliders — Software brightness naming (not physical backlight).
     warmthSlider.target = self
     warmthSlider.action = #selector(changeWarmth)
     warmthSlider.setAccessibilityLabel("Warmth")
     warmthSlider.translatesAutoresizingMaskIntoConstraints = false
     brightnessSlider.target = self
     brightnessSlider.action = #selector(changeBrightness)
-    brightnessSlider.setAccessibilityLabel("Apparent brightness")
+    brightnessSlider.setAccessibilityLabel("Software brightness")
     brightnessSlider.translatesAutoresizingMaskIntoConstraints = false
     warmthValue.font = EmberFont.sliderValue()
     warmthValue.textColor = EmberColor.textSecondary
@@ -101,11 +112,16 @@ final class ControlPanelViewController: NSViewController {
     // Static caption for sun schedule
     sunScheduleRow.setCaption("Uses approximate location on-device.", color: EmberColor.textMuted, showButton: false)
     // Keep location button handling inside row – will be toggled in render
+    behaviorRow.onSelect = { [weak self] action in
+      self?.coordinator.setMenuBarPrimaryAction(action)
+    }
+    behaviorRow.setAccessibility()
 
     settingsCard.translatesAutoresizingMaskIntoConstraints = false
     settingsCard.addRow(backlightRow, showDivider: true)
     settingsCard.addRow(sunScheduleRow, showDivider: true)
-    settingsCard.addRow(launchRow, showDivider: false)
+    settingsCard.addRow(launchRow, showDivider: true)
+    settingsCard.addRow(behaviorRow, showDivider: false)
 
     // Footer actions
     footerActions.diagnosticsButton.target = self
@@ -117,37 +133,42 @@ final class ControlPanelViewController: NSViewController {
     footerActions.translatesAutoresizingMaskIntoConstraints = false
 
     footerBar.translatesAutoresizingMaskIntoConstraints = false
-    footerBar.setText(version: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "v1.0.0")
+    footerBar.setText(version: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String).map { "v\($0)" } ?? AppVersion.displayString)
 
-    // Content stack – create hierarchy first, then populate
+    // Content: real NSScrollView with pinned footer. Normal state fits without
+    // an always-visible scrollbar; larger text/localization/permission errors
+    // and the Behavior row scroll instead of compressing controls.
     scrollContent.orientation = .vertical
     scrollContent.alignment = .leading
     scrollContent.spacing = 14
     scrollContent.translatesAutoresizingMaskIntoConstraints = false
 
-    // Container for content with padding
-    let container = NSView()
-    container.translatesAutoresizingMaskIntoConstraints = false
-    background.addSubview(container)
-    container.addSubview(scrollContent)
+    let scroll = NSScrollView()
+    scroll.translatesAutoresizingMaskIntoConstraints = false
+    scroll.hasVerticalScroller = true
+    scroll.hasHorizontalScroller = false
+    scroll.autohidesScrollers = true
+    scroll.borderType = .noBorder
+    scroll.drawsBackground = false
+    scroll.documentView = scrollContent
+    // Keep footer pinned outside the scroll region.
+    background.addSubview(scroll)
     background.addSubview(footerBar)
 
     NSLayoutConstraint.activate([
-      container.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: EmberMetrics.contentHInset),
-      container.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -EmberMetrics.contentHInset),
-      container.topAnchor.constraint(equalTo: background.topAnchor, constant: 14),
-      container.bottomAnchor.constraint(equalTo: footerBar.topAnchor, constant: -12),
+      scroll.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: EmberMetrics.contentHInset),
+      scroll.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -EmberMetrics.contentHInset),
+      scroll.topAnchor.constraint(equalTo: background.topAnchor, constant: 14),
+      scroll.bottomAnchor.constraint(equalTo: footerBar.topAnchor, constant: -12),
 
-      scrollContent.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-      scrollContent.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      scrollContent.topAnchor.constraint(equalTo: container.topAnchor),
-      scrollContent.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+      scrollContent.widthAnchor.constraint(equalTo: scroll.widthAnchor),
 
       footerBar.leadingAnchor.constraint(equalTo: background.leadingAnchor),
       footerBar.trailingAnchor.constraint(equalTo: background.trailingAnchor),
       footerBar.bottomAnchor.constraint(equalTo: background.bottomAnchor),
       footerBar.heightAnchor.constraint(equalToConstant: EmberMetrics.footerBarHeight),
     ])
+    scrollView = scroll
 
     // Now populate stack – width constraints are safe now that scrollContent has superview
     scrollContent.addArrangedSubview(headerView)
@@ -166,7 +187,7 @@ final class ControlPanelViewController: NSViewController {
     scrollContent.addArrangedSubview(warmthBlock)
     warmthBlock.widthAnchor.constraint(equalTo: scrollContent.widthAnchor).isActive = true
 
-    let brightnessBlock = makeSliderBlock(title: "BRIGHTNESS", valueLabel: brightnessValue, slider: brightnessSlider, iconName: "sun.max.fill", variant: .brightness)
+    let brightnessBlock = makeSliderBlock(title: "SOFTWARE BRIGHTNESS", valueLabel: brightnessValue, slider: brightnessSlider, iconName: "sun.max.fill", variant: .brightness)
     scrollContent.addArrangedSubview(brightnessBlock)
     brightnessBlock.widthAnchor.constraint(equalTo: scrollContent.widthAnchor).isActive = true
 
@@ -182,27 +203,36 @@ final class ControlPanelViewController: NSViewController {
     scrollContent.addArrangedSubview(footerActions)
     footerActions.widthAnchor.constraint(equalTo: scrollContent.widthAnchor).isActive = true
 
-    // Subtle entrance animation – scale + fade (respects reduce motion)
+    // Subtle entrance animation – set model transform to identity BEFORE adding
+    // the scale animation so content cannot remain at or snap from 0.98.
     let isSnapshot = CommandLine.arguments.contains("--snapshot-ui")
+    scrollContent.wantsLayer = true
     if !isSnapshot && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
       scrollContent.alphaValue = 0
-      scrollContent.layer?.transform = CATransform3DMakeScale(0.98, 0.98, 1)
+      scrollContent.layer?.transform = CATransform3DIdentity
       NSAnimationContext.runAnimationGroup { ctx in
         ctx.duration = 0.28
         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
         scrollContent.animator().alphaValue = 1
       }
-      // scale animation via layer
       let scale = CABasicAnimation(keyPath: "transform.scale")
       scale.fromValue = 0.98
       scale.toValue = 1.0
       scale.duration = 0.28
       scale.timingFunction = CAMediaTimingFunction(name: .easeOut)
+      scrollContent.layer?.transform = CATransform3DIdentity
       scrollContent.layer?.add(scale, forKey: "entranceScale")
     } else {
       scrollContent.alphaValue = 1
       scrollContent.layer?.transform = CATransform3DIdentity
+      scrollContent.layer?.removeAnimation(forKey: "entranceScale")
     }
+  }
+
+  override func viewWillDisappear() {
+    super.viewWillDisappear()
+    // Flush debounced settings/journal; stop orb animation when popover closes.
+    coordinator.flushPendingSettings()
   }
 
   // MARK: - Render (logic preserved, visuals upgraded)
@@ -230,8 +260,8 @@ final class ControlPanelViewController: NSViewController {
       launchRow.toggle.setOn(settings.launchAtLogin, animated: true)
     }
 
-    // Power button + header ON/OFF (BETA moved to footer)
-    let isActive = snapshot.runtimeState == .active
+    // Power button + header ON/OFF — observed truth drives the UI.
+    let isActive = snapshot.isObservedActive
     headerView.powerButton.isActiveState = isActive
     headerView.setState(isActive: isActive)
     headerView.powerButton.toolTip = isActive ? "Restore original display" : "Apply Ember display filter"
@@ -249,122 +279,142 @@ final class ControlPanelViewController: NSViewController {
     }
     pillControl.setSelectedSegment(preset, animated: true)
 
-    // Hero mapping – pleasure, circadian-aligned copy
+    // Hero mapping — mechanism-based copy (no health absolutes, no PWM claims).
     let heroTitle: String
     let heroDetail: String
     let metaIconName: String?
     let metaText: String
     var sunsetAttr: NSAttributedString? = nil
 
-    switch snapshot.runtimeState {
-    case .active:
-      // Preset-aware titles
-      if abs(settings.warmth - EmberPreset.pureRed.warmth) < 0.01 {
-        heroTitle = "Pure Red is on"
-        heroDetail = "Your display is tuned for deep rest and recovery."
-      } else if abs(settings.warmth - EmberPreset.evening.warmth) < 0.01 {
-        heroTitle = "Evening light is on"
-        heroDetail = "Warm tones to ease you into the night."
-      } else if abs(settings.warmth - EmberPreset.neutral.warmth) < 0.01 {
-        heroTitle = "Neutral is on"
-        heroDetail = "True color, softly preserved."
-      } else {
-        // intermediate warmth – use kelvin but keep pleasure tone
-        let kelvinLabel = snapshot.warmthDescription
-        if kelvinLabel == "Neutral" {
-          heroTitle = "Neutral is on"
-          heroDetail = "True color, softly preserved."
-        } else if kelvinLabel == "Pure Red" {
+    // Render from the single coherent presentation model: never reinterpret raw
+    // state separately. Pending-only uses calm copy; real degraded shows attention.
+    if let attentionTitle = snapshot.attentionTitle,
+      snapshot.statusTitle == "Needs attention"
+    {
+      heroTitle = attentionTitle
+      heroDetail = snapshot.attentionMessage ?? snapshot.statusDetail
+      metaIconName = "exclamationmark.triangle.fill"
+      metaText = heroDetail
+    } else {
+      switch snapshot.runtimeState {
+      case .active where isActive:
+        // Preset-aware titles, mechanism language.
+        if abs(settings.warmth - EmberPreset.pureRed.warmth) < 0.01 {
           heroTitle = "Pure Red is on"
-          heroDetail = "Your display is tuned for deep rest and recovery."
+          heroDetail = "A red-channel-only display mode for low-light evenings."
+        } else if abs(settings.warmth - EmberPreset.evening.warmth) < 0.01 {
+          heroTitle = "Evening light is on"
+          heroDetail = "Reduces short-wavelength display output for evening use."
+        } else if abs(settings.warmth - EmberPreset.neutral.warmth) < 0.01 {
+          heroTitle = "Neutral is on"
+          heroDetail = "Software dimming with original color preserved."
         } else {
-          heroTitle = "\(kelvinLabel) is on"
-          heroDetail = "Warmth crafted for this moment."
+          let kelvinLabel = snapshot.warmthDescription
+          if kelvinLabel == "Neutral" {
+            heroTitle = "Neutral is on"
+            heroDetail = "Software dimming with original color preserved."
+          } else if kelvinLabel == "Pure Red" {
+            heroTitle = "Pure Red is on"
+            heroDetail = "A red-channel-only display mode for low-light evenings."
+          } else {
+            heroTitle = "\(kelvinLabel) is on"
+            heroDetail = "Lower melanopic output can be less disruptive at night, but sensitivity and display spectra vary."
+          }
         }
-      }
-      metaIconName = "clock"
-      let count = snapshot.controlledDisplayCount
-      if snapshot.pendingRestoreCount > 0 {
-        metaText = "Active on \(count) \(count == 1 ? "display" : "displays") · \(snapshot.pendingRestoreCount) pending"
-      } else if snapshot.unsupportedDisplayCount > 0 {
-        metaText = "Active on \(count) of \(snapshot.availableDisplayCount) displays"
-      } else {
-        metaText = "Active on \(count) \(count == 1 ? "display" : "displays")"
-      }
-      // Sunset – only when Sun schedule is enabled and we have a next event time
-      if settings.sunScheduleEnabled && !snapshot.solarStatusDetail.isEmpty {
-        let detail = snapshot.solarStatusDetail
-        // Only show sunset line when it contains a time (Next:/Manual override), not the generic "Turns Ember..."
-        if detail.contains("Next:") || detail.contains("Manual override") || detail.contains("Getting") {
-          let attr = NSMutableAttributedString(string: detail)
-          attr.addAttribute(.foregroundColor, value: EmberColor.textSecondary, range: NSRange(location: 0, length: attr.length))
-          attr.addAttribute(.font, value: NSFont.systemFont(ofSize: 9.5, weight: .regular), range: NSRange(location: 0, length: attr.length))
-          if let range = detail.range(of: "at ") {
-            let timeStr = String(detail[range.upperBound...]).replacingOccurrences(of: ".", with: "")
-            let timeRange = (attr.string as NSString).range(of: timeStr)
-            if timeRange.location != NSNotFound {
-              attr.addAttribute(.foregroundColor, value: EmberColor.ember400, range: timeRange)
-              attr.addAttribute(.font, value: NSFont.systemFont(ofSize: 9.5, weight: .medium), range: timeRange)
-            } else {
-              for word in ["Sunset", "Sunrise", "sunset", "sunrise"] {
-                let r = (attr.string as NSString).range(of: word)
-                if r.location != NSNotFound {
-                  attr.addAttribute(.foregroundColor, value: EmberColor.ember400, range: r)
-                }
-              }
-            }
+        metaIconName = "clock"
+        let count = snapshot.verifiedDisplayCount
+        if snapshot.pendingRestoreCount > 0 {
+          metaText = "Active on \(count) \(count == 1 ? "display" : "displays") · \(snapshot.pendingRestoreCount) pending"
+        } else if snapshot.unsupportedDisplayCount > 0 {
+          metaText = "Active on \(count) of \(snapshot.availableDisplayCount) displays"
+        } else {
+          metaText = "Active on \(count) \(count == 1 ? "display" : "displays")"
+        }
+        // Structured solar data — never parse English strings for styling.
+        if settings.sunScheduleEnabled, let eventDate = snapshot.solarPresentation.eventDate,
+          let kind = snapshot.solarPresentation.eventKind
+        {
+          let name = kind == .sunrise ? "Sunrise" : "Sunset"
+          let time = eventDate.formatted(date: .omitted, time: .shortened)
+          let prefix: String
+          if let override = settings.automationOverride, override.expiresAt > Date() {
+            prefix = "Manual override until \(name.lowercased())"
+          } else {
+            prefix = "Next: \(name)"
+          }
+          let full = "\(prefix) at \(time)"
+          let attr = NSMutableAttributedString(string: full)
+          attr.addAttribute(
+            .foregroundColor, value: EmberColor.textSecondary,
+            range: NSRange(location: 0, length: attr.length))
+          attr.addAttribute(
+            .font, value: NSFont.systemFont(ofSize: 9.5, weight: .regular),
+            range: NSRange(location: 0, length: attr.length))
+          let timeRange = (full as NSString).range(of: time)
+          if timeRange.location != NSNotFound {
+            attr.addAttribute(.foregroundColor, value: EmberColor.ember400, range: timeRange)
+            attr.addAttribute(
+              .font, value: NSFont.systemFont(ofSize: 9.5, weight: .medium), range: timeRange)
           }
           sunsetAttr = attr
+        } else if settings.sunScheduleEnabled,
+          snapshot.solarPresentation.isRefreshing
+        {
+          let attr = NSMutableAttributedString(string: "Getting an approximate location…")
+          attr.addAttribute(
+            .foregroundColor, value: EmberColor.textSecondary,
+            range: NSRange(location: 0, length: attr.length))
+          sunsetAttr = attr
         }
-      }
-    case .degraded(let message):
-      heroTitle = "Needs attention"
-      heroDetail = message
-      metaIconName = "exclamationmark.triangle.fill"
-      metaText = message
-    case .activating:
-      heroTitle = "Applying…"
-      heroDetail = "Saving every display state first…"
-      metaIconName = "arrow.triangle.2.circlepath"
-      metaText = heroDetail
-    case .restoring(let intent):
-      heroTitle = "Restoring…"
-      heroDetail = intent == .sleep ? "Preparing every display for sleep…" : "Returning every display to its saved state…"
-      metaIconName = "arrow.triangle.2.circlepath"
-      metaText = heroDetail
-    case .suspended:
-      heroTitle = "Paused for sleep"
-      heroDetail = "Ember will safely re-evaluate after wake."
-      metaIconName = "moon.zzz.fill"
-      metaText = heroDetail
-    default: // .off
-      if let msg = snapshot.statusTitle as String?, msg == "No compatible display" {
-        heroTitle = "No compatible display"
-        heroDetail = snapshot.statusDetail
-        metaIconName = "display.trianglebadge.exclamationmark"
-        metaText = snapshot.statusDetail
-      } else if snapshot.statusTitle == "Needs attention" {
-        heroTitle = snapshot.statusTitle
-        heroDetail = snapshot.statusDetail
+      case .degraded(let message):
+        heroTitle = "Needs attention"
+        heroDetail = message
         metaIconName = "exclamationmark.triangle.fill"
-        metaText = snapshot.statusDetail
-      } else {
-        heroTitle = "Ready"
-        if snapshot.displayAvailable {
-          heroDetail = "Your original display state is untouched."
-          metaIconName = "checkmark.circle.fill"
-          let count = snapshot.availableDisplayCount
-          metaText = "\(count) compatible \(count == 1 ? "display" : "displays") ready"
-        } else {
+        metaText = message
+      case .activating, .reconciling:
+        heroTitle = "Applying…"
+        heroDetail = "Saving every display state first…"
+        metaIconName = "arrow.triangle.2.circlepath"
+        metaText = heroDetail
+      case .restoring(let intent):
+        heroTitle = "Restoring…"
+        heroDetail = intent == .sleep ? "Preparing every display for sleep…" : "Returning every display to its saved state…"
+        metaIconName = "arrow.triangle.2.circlepath"
+        metaText = heroDetail
+      case .suspended:
+        heroTitle = "Paused for sleep"
+        heroDetail = "Ember will safely re-evaluate after wake."
+        metaIconName = "moon.zzz.fill"
+        metaText = heroDetail
+      default: // .off
+        if snapshot.statusTitle == "No compatible display" {
+          heroTitle = "No compatible display"
           heroDetail = snapshot.statusDetail
-          metaIconName = "circle.fill"
-          metaText = heroDetail
+          metaIconName = "display.trianglebadge.exclamationmark"
+          metaText = snapshot.statusDetail
+        } else if snapshot.statusTitle == "Needs attention" {
+          heroTitle = snapshot.statusTitle
+          heroDetail = snapshot.statusDetail
+          metaIconName = "exclamationmark.triangle.fill"
+          metaText = snapshot.statusDetail
+        } else {
+          heroTitle = "Ready"
+          if snapshot.displayAvailable {
+            heroDetail = "Your original display state is untouched."
+            metaIconName = "checkmark.circle.fill"
+            let count = snapshot.availableDisplayCount
+            metaText = "\(count) compatible \(count == 1 ? "display" : "displays") ready"
+          } else {
+            heroDetail = snapshot.statusDetail
+            metaIconName = "circle.fill"
+            metaText = heroDetail
+          }
         }
       }
     }
 
-    // Apply to hero
-    heroView.render(title: heroTitle, detail: heroDetail, metaIconName: metaIconName, metaText: metaText, sunsetText: sunsetAttr, isActive: isActive, showWaves: true)
+    // Apply to hero — showWaves honored (extra glow only when active).
+    heroView.render(title: heroTitle, detail: heroDetail, metaIconName: metaIconName, metaText: metaText, sunsetText: sunsetAttr, isActive: isActive, showWaves: isActive)
 
     // Sunset handling when not active: if hero already shows sunsetAttr, keep; else hide second line
     // For active, hero's sunsetLabel shows solar detail; for off, hide if no schedule
@@ -388,7 +438,7 @@ final class ControlPanelViewController: NSViewController {
     // Header power enabled (masterButton equivalent)
     headerView.powerButton.isEnabled = controlsEnabled
 
-    // Backlight capability caption
+    // Backlight capability caption — accurate product language.
     if snapshot.backlightAvailable {
       let cap: String
       if snapshot.availableDisplayCount > 1 {
@@ -399,10 +449,26 @@ final class ControlPanelViewController: NSViewController {
           : "Supported · hardware brightness restore"
       }
       backlightRow.setCaption(cap, color: EmberColor.textSecondary, showButton: false)
+      backlightRow.detailLabel.stringValue =
+        "Keeps a compatible built-in display at full hardware brightness while Ember dims in software. This may reduce brightness-related flicker on some displays; Ember does not measure or guarantee PWM behavior."
       backlightRow.detailLabel.textColor = EmberColor.textSecondary
     } else {
-      backlightRow.setCaption("Unavailable on this display", color: EmberColor.error, showButton: false)
+      backlightRow.detailLabel.stringValue =
+        "Keeps a compatible built-in display at full hardware brightness while Ember dims in software."
+      if case .unavailable(let reason) = snapshot.backlightEngagement,
+        settings.backlightLockEnabled
+      {
+        backlightRow.setCaption(reason, color: EmberColor.warning, showButton: false)
+      } else {
+        backlightRow.setCaption("Unavailable on this display", color: EmberColor.error, showButton: false)
+      }
       backlightRow.detailLabel.textColor = EmberColor.textSecondary
+    }
+    // Very low software brightness may reduce tonal precision on some displays.
+    if settings.apparentBrightness < 0.25, isActive {
+      brightnessValue.toolTip = "Very low software brightness may reduce tonal precision or cause banding on some displays."
+    } else {
+      brightnessValue.toolTip = nil
     }
 
     // Sun schedule row – detail is solarStatusDetail, caption + location button
@@ -421,7 +487,8 @@ final class ControlPanelViewController: NSViewController {
     }
     // Update row alpha for busy
     sunScheduleRow.alphaValue = snapshot.isBusy ? 0.6 : 1
-
+    // Behavior row — compact setting with right-click caption.
+    behaviorRow.render(settings.menuBarPrimaryAction)
     // Footer bar already set – ensure version stays
   }
 
@@ -470,16 +537,17 @@ final class ControlPanelViewController: NSViewController {
     block.alignment = .leading
     block.spacing = 6
     block.translatesAutoresizingMaskIntoConstraints = false
-    block.widthAnchor.constraint(equalToConstant: 358).isActive = true
-    heading.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
-    sliderRow.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+    // No brittle fixed text widths: let the stack determine width from scroll view.
+    heading.translatesAutoresizingMaskIntoConstraints = false
+    sliderRow.translatesAutoresizingMaskIntoConstraints = false
     return block
   }
 
   // MARK: - Actions – preserved verbatim logic
 
   @objc private func toggleMaster() {
-    coordinator.setFilterEnabled(coordinator.currentSnapshot().runtimeState != .active)
+    // Observed truth drives the toggle, not desired state alone.
+    coordinator.setFilterEnabled(!coordinator.currentSnapshot().isObservedActive)
     NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
   }
 
@@ -490,11 +558,26 @@ final class ControlPanelViewController: NSViewController {
   }
 
   @objc private func changeWarmth() {
+    // Update value text immediately during drag; gamma writes are coalesced.
+    warmthValue.stringValue = {
+      let w = warmthSlider.doubleValue / 100
+      if let kelvin = ColorCurve.approximateKelvin(forWarmth: w) {
+        if w < 0.01 { return "Neutral" }
+        return "~\(Int(kelvin.rounded() / 50) * 50) K"
+      }
+      return "Pure Red"
+    }()
     coordinator.setWarmth(warmthSlider.doubleValue / 100)
   }
 
   @objc private func changeBrightness() {
+    brightnessValue.stringValue = "\(Int((brightnessSlider.doubleValue).rounded()))%"
     coordinator.setApparentBrightness(brightnessSlider.doubleValue / 100)
+  }
+
+  @objc private func sliderMouseUp() {
+    // Flush final value on mouse-up (bounded debounce already coalesces).
+    coordinator.flushPendingSettings()
   }
 
   @objc private func toggleBacklightLock() {

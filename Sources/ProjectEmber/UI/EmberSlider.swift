@@ -39,21 +39,20 @@ final class EmberSliderCell: NSSliderCell {
     filledPath.addClip()
 
     if variant == .warmth {
-      // Gradient from neutral gray to ember orange to pure red
-      let gradient: NSGradient
-      if valueRatio <= 0.82 {
-        gradient = NSGradient(colors: [
-          EmberColor.sliderTrackWarmNeutral.withAlphaComponent(alpha),
-          EmberColor.sliderTrackWarmMid.withAlphaComponent(alpha),
-        ])!
-      } else {
-        // blend mid to pure red tail
-        gradient = NSGradient(colors: [
-          EmberColor.sliderTrackWarmMid.withAlphaComponent(alpha),
-          EmberColor.ember500.withAlphaComponent(alpha),
-        ])!
-      }
-      gradient.draw(in: filledRect, angle: 0)
+      // Fixed three-stop warmth gradient (neutral → evening → pure red),
+      // clipped to the filled portion. Never replace the fill after 82%;
+      // the left side must not jump color.
+      let gradient = NSGradient(colors: [
+        EmberColor.sliderTrackWarmNeutral.withAlphaComponent(alpha),
+        EmberColor.sliderTrackWarmMid.withAlphaComponent(alpha),
+        EmberColor.ember500.withAlphaComponent(alpha),
+      ])!
+      // Draw the full three-stop gradient across the entire track, clipped to fill.
+      NSGraphicsContext.saveGraphicsState()
+      // Clip already set to filledPath; draw gradient mapped to full track width
+      // so the visible left side is stable as value changes.
+      gradient.draw(in: trackRect, angle: 0)
+      NSGraphicsContext.restoreGraphicsState()
     } else {
       // brightness: solid ember with dim to bright interpolation
       let start = EmberColor.sliderTrackDim.withAlphaComponent(alpha * 0.55)

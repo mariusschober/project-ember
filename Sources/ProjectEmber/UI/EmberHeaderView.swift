@@ -82,7 +82,7 @@ final class EmberPowerButton: NSButton {
 final class EmberHeaderView: NSView {
   let iconView = NSImageView()
   let titleLabel = NSTextField(labelWithString: "EMBER")
-  let subtitleLabel = NSTextField(labelWithString: "Light in harmony with your body.")
+  let subtitleLabel = NSTextField(labelWithString: "Reduces short-wavelength display output for evening use.")
   let powerButton = EmberPowerButton(frame: .zero)
   let stateLabel = NSTextField(labelWithString: "OFF")
   let betaLabel = NSTextField(labelWithString: "BETA") // kept for compatibility, hidden
@@ -161,7 +161,7 @@ final class EmberFooterBarView: NSView {
   let heartView = NSImageView()
   let textLabel = NSTextField(labelWithString: "")
   let betaBadge = NSTextField(labelWithString: "BETA")
-  let versionLabel = NSTextField(labelWithString: "v1.0.0")
+  let versionLabel = NSTextField(labelWithString: "v0.4.0")
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -225,7 +225,7 @@ final class EmberFooterBarView: NSView {
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
 
-  func setText(circadianPrefix: String = "Designed for your ", circadianAccent: String = "circadian health", version: String = "v1.0.0") {
+  func setText(circadianPrefix: String = "Designed by Marius Schober ", circadianAccent: String = "for circadian-aware evenings", version: String = "v0.4.0") {
     let full = circadianPrefix + circadianAccent
     let attr = NSMutableAttributedString(string: full)
     attr.addAttribute(.foregroundColor, value: EmberColor.textSecondary, range: NSRange(location: 0, length: full.count))

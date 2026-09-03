@@ -178,9 +178,9 @@ final class EmberOrbView: NSView {
     if window == nil || window?.isVisible == false || window?.occlusionState.contains(.visible) == false {
       return
     }
-    pulsing = true
-    // Respect reduce motion
+    // Respect Reduce Motion: do not mark as pulsing when no animation is installed.
     if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return }
+    pulsing = true
 
     let scale = CABasicAnimation(keyPath: "transform.scale")
     scale.fromValue = 1.0
@@ -215,6 +215,13 @@ final class EmberOrbView: NSView {
     orbLayer.removeAnimation(forKey: "pulseScale")
     orbLayer.removeAnimation(forKey: "pulseOpacity")
     glowLayer.removeAnimation(forKey: "pulseGlow")
+  }
+
+  /// Explicit stop for popover close/occlusion; restarts only when visible+active.
+  func stopRepetitiveAnimation() { stopPulse() }
+
+  func setWavesVisible(_ visible: Bool) {
+    for w in waveLayers { w.opacity = visible ? w.opacity : 0.15 }
   }
 
   override func viewDidMoveToWindow() {
@@ -382,9 +389,9 @@ final class HeroStatusView: NSView {
       : [EmberColor.surfaceHeroFrom.cgColor, EmberColor.surfaceHeroTo.cgColor]
     layer?.borderColor = isActive ? EmberColor.borderHero.cgColor : EmberColor.borderSubtle.cgColor
     orbView.setActive(isActive, animated: true)
-    orbView.isHidden = !showWaves // keep hidden for off? spec shows sun even dim - but we show dimmed
-    // Always show orb per screenshot, but dim when off
+    // showWaves is honored: waves/extra glow only when requested and active.
     orbView.isHidden = false
+    orbView.setWavesVisible(showWaves && isActive)
     needsDisplay = true
   }
 
