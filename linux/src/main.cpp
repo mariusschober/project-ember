@@ -5,11 +5,13 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QTextStream>
 
 #include <iostream>
 #include <cmath>
+#include <unistd.h>
 
 namespace {
 
@@ -57,29 +59,47 @@ QVariantMap localReadOnlyStatus() {
 int headlessRestore() {
   const ember::Paths paths = ember::Paths::fromEnvironment();
   ember::SettingsStore settingsStore(paths);
-  ember::Settings settings = settingsStore.load().settings;
+  const ember::SettingsLoadResult settingsResult = settingsStore.load();
+  ember::Settings settings = settingsResult.settings;
+  const bool cleanExit = QFileInfo::exists(paths.cleanExitFile);
   settings.filterEnabled = false;
   settings.backlightLockEnabled = false;
-  settings.automationPaused = true;
-  QString settingsError;
-  if (!settingsStore.save(settings, &settingsError)) {
-    QTextStream(stderr) << "project-ember: could not save safety settings: " << settingsError << '\n';
-    return 1;
-  }
-  QString latchError;
-  if (!ember::writeDurableFile(paths.safetyLatchFile, QByteArray("paused\n"), 0600, &latchError)) {
-    QTextStream(stderr) << "project-ember: could not write automation safety latch: " << latchError << '\n';
-    return 1;
-  }
-  ember::RecoveryJournal journal(paths);
+  const ember::RecoveryJournal journal(paths);
   const ember::RecoveryLoadResult result = journal.load();
-  if (result.kind == ember::LoadKind::NoFile) return 0;
+  const bool recoveryNeedsPause = result.kind != ember::LoadKind::NoFile;
+  const bool canPersistSettings = settingsResult.kind == ember::LoadKind::Loaded || settingsResult.kind == ember::LoadKind::NoFile;
+  settings.automationPaused = settings.automationPaused || !cleanExit || recoveryNeedsPause || !canPersistSettings;
+  bool settingsSaveFailed = false;
+  if (canPersistSettings) {
+    QString settingsError;
+    if (!settingsStore.save(settings, &settingsError)) {
+      settingsSaveFailed = true;
+      QTextStream(stderr) << "project-ember: could not save safety settings: " << settingsError << '\n';
+    }
+  }
+  if (settings.automationPaused || settingsSaveFailed) {
+    QString latchError;
+    if (!ember::writeDurableFile(paths.safetyLatchFile, QByteArray("paused\n"), 0600, &latchError)) {
+      QTextStream(stderr) << "project-ember: could not write automation safety latch: " << latchError << '\n';
+      return 1;
+    }
+  } else {
+    (void)unlink(paths.safetyLatchFile.toUtf8().constData());
+  }
+  if (result.kind == ember::LoadKind::NoFile) {
+    (void)unlink(paths.cleanExitFile.toUtf8().constData());
+    return settingsSaveFailed ? 1 : 0;
+  }
   if (result.kind != ember::LoadKind::Loaded) {
     QTextStream(stderr) << "project-ember: recovery remains pending; journal was not treated as empty: " << result.detail << '\n';
     return 1;
   }
   ember::RecoveryRecord record = result.record;
-  if (!record.hardware.has_value()) return journal.clear() ? 0 : 1;
+  if (!record.hardware.has_value()) {
+    const bool cleared = journal.clear();
+    if (cleared) (void)unlink(paths.cleanExitFile.toUtf8().constData());
+    return cleared && !settingsSaveFailed ? 0 : 1;
+  }
   ember::BacklightController backlight(paths);
   QString error;
   if (!backlight.restore(&record, &error)) {
@@ -93,7 +113,8 @@ int headlessRestore() {
     QTextStream(stderr) << "project-ember: hardware restored but journal cleanup failed: " << error << '\n';
     return 1;
   }
-  return 0;
+  (void)unlink(paths.cleanExitFile.toUtf8().constData());
+  return settingsSaveFailed ? 1 : 0;
 }
 
 int runResident(int argc, char **argv) {

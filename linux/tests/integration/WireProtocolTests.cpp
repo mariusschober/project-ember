@@ -210,6 +210,7 @@ class WireProtocolTests final : public QObject {
 private slots:
   void registryProbeDoesNotBindManager();
   void completeMatrixCommitAndProcessedEvidence();
+  void blockedManagerDoesNotReportApplied();
 };
 
 void WireProtocolTests::registryProbeDoesNotBindManager() {
@@ -259,6 +260,30 @@ void WireProtocolTests::completeMatrixCommitAndProcessedEvidence() {
     QCOMPARE(server.output.matrix[0], static_cast<wl_fixed_t>(wl_fixed_from_double(matrixFor(settings).values[0])));
     QCOMPARE(server.output.matrix[4], static_cast<wl_fixed_t>(wl_fixed_from_double(matrixFor(settings).values[4])));
     QCOMPARE(server.output.matrix[8], static_cast<wl_fixed_t>(wl_fixed_from_double(matrixFor(settings).values[8])));
+    backend.release();
+  }
+  stopServer(&server);
+}
+
+void WireProtocolTests::blockedManagerDoesNotReportApplied() {
+  QTemporaryDir runtime;
+  QVERIFY(runtime.isValid());
+  FakeServer server;
+  QString startError;
+  if (!startServer(&server, runtime, &startError)) {
+    const QByteArray skipMessage = startError.toLocal8Bit();
+    QSKIP(skipMessage.constData());
+  }
+  server.managerOwner.store(true);
+  {
+    WaylandBackend backend;
+    QSignalSpy blocked(&backend, &WaylandBackend::blocked);
+    QSignalSpy applied(&backend, &WaylandBackend::applied);
+    backend.apply(matrixFor(Settings::defaults()), 7);
+    QVERIFY(!blocked.isEmpty());
+    QVERIFY(applied.isEmpty());
+    QCOMPARE(server.setRequests.load(), 0);
+    QCOMPARE(server.commits.load(), 0);
     backend.release();
   }
   stopServer(&server);

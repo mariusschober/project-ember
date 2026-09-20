@@ -1,0 +1,34 @@
+name: Linux
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake ninja-build pkg-config g++ \
+            dbus \
+            qt6-base-dev qt6-wayland-dev libwayland-dev \
+            wayland-protocols libxkbcommon-dev
+      - name: Configure Debug
+        run: cmake -S linux -B build/linux-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+      - name: Build Debug
+        run: cmake --build build/linux-debug --parallel
+      - name: Test Debug
+        run: dbus-run-session -- ctest --test-dir build/linux-debug --output-on-failure
+      - name: Configure Release
+        run: cmake -S linux -B build/linux-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build Release
+        run: cmake --build build/linux-release --parallel
+      - name: Test Release
+        run: dbus-run-session -- ctest --test-dir build/linux-release --output-on-failure
+      - name: Check whitespace
+        run: git diff --check

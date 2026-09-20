@@ -159,6 +159,7 @@ bool AppController::start(QString *error) {
     settings_.automationPaused = true;
     recoveryPending_ = true;
   }
+  (void)unlink(paths_.cleanExitFile.toUtf8().constData());
   persistNow();
 
   loginRegistered_ = loginIsRegistered();
@@ -405,6 +406,8 @@ void AppController::quit() {
   (void)restoreHardwareAndJournal();
   invokeRelease();
   persistNow();
+  QString markerError;
+  (void)writeDurableFile(paths_.cleanExitFile, QByteArray("clean\n"), 0600, &markerError);
   QTimer::singleShot(250, this, &AppController::finalizeQuit);
   publish();
 }

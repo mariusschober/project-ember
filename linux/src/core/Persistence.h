@@ -17,6 +17,7 @@ struct Paths {
   QString recoveryFile;
   QString safetyLatchFile;
   QString guardianFile;
+  QString cleanExitFile;
 
   static Paths fromEnvironment();
 };

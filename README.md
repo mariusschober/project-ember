@@ -111,6 +111,15 @@ journaled baseline before staying off or following an enabled Sun schedule.
 - True grayscale and E-Ink modes are not included.
 - No external-display DDC/CI brightness control in this release.
 
+## Linux / Omarchy candidate
+
+The repository also contains an independent native Linux candidate in
+[`linux/README.md`](linux/README.md). It uses Qt 6, a dedicated Wayland CTM v2
+connection, and a supervised user service; it does not replace or modify the
+existing macOS app. The candidate is not claimed as daily-use validated until
+the named Omarchy hardware and real-session rows in
+[`linux/docs/HARDWARE_ACCEPTANCE.md`](linux/docs/HARDWARE_ACCEPTANCE.md) pass.
+
 ## Build locally
 
 Run `scripts/build-local-beta.sh` from the ProjectEmber folder. The script

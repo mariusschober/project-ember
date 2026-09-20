@@ -107,6 +107,7 @@ Paths Paths::fromEnvironment() {
   paths.recoveryFile = QDir(paths.stateDir).filePath(QStringLiteral("recovery.json"));
   paths.safetyLatchFile = QDir(paths.stateDir).filePath(QStringLiteral("automation-paused"));
   paths.guardianFile = QDir(paths.runtimeDir).filePath(QStringLiteral("guardian.json"));
+  paths.cleanExitFile = QDir(paths.runtimeDir).filePath(QStringLiteral("clean-exit"));
   return paths;
 }
 
