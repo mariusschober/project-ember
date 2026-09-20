@@ -1,0 +1,6 @@
+The hyprland-ctm-control-v1.xml protocol is vendored from
+hyprwm/hyprland-protocols blob 6cb791c1710cdedfc59b3d48fd91cca997d1eabd.
+
+The XML retains its original BSD-3-Clause copyright and disclaimer in the
+<copyright> element. Generated protocol code is derived from that XML by
+wayland-scanner during the build; no generated code is committed.

@@ -1,5 +1,6 @@
 # SwiftPM build
 .build/
+build/
 .swiftpm/
 *.o
 *.d

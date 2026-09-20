@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Project Ember
+Comment=Native evening display controller
+Exec=project-ember settings
+TryExec=project-ember
+Icon=project-ember
+Terminal=false
+Categories=Utility;
+StartupNotify=true
