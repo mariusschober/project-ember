@@ -10,6 +10,8 @@ Disposition: implementation checkpoint for review; not merged, released, or depl
 - The branch started at 01d0aa79a4bfe4dcfce3bdfb68e13e9343158953.
 - The first local implementation checkpoint is 637f7f8.
 - The corresponding GitHub API-pushed checkpoint is 725554d16c481f4fe18d80d0859627854c2bbcb9.
+- The second local implementation/operations checkpoint is ea02c95.
+- The corresponding GitHub API-pushed checkpoint is 56d58a406d296f07b3c67413a3cdda62fe16de77.
 - Mac reference behavior was read from commit 41973930103c5c12c5c04715f4a1943ff759628d, tree b46195b62135658ae45b54a7261a0c872a9abbef.
 - The committed CTM XML is the hyprwm/hyprland-protocols blob 6cb791c1710cdedfc59b3d48fd91cca997d1eabd; attribution is in linux/protocols/NOTICE.
 - No Mac source files were changed.
@@ -81,7 +83,7 @@ Additional checks:
   icon, CTM notice and /usr/lib/systemd/user/project-ember.service.
 - Local install-tree archive (not a public release):
   /tmp/project-ember-0.1.0-linux-alpha.1-x86_64-install.tar, SHA-256
-  0e8b2659452ba556ea64234eb5ac4aa48f9548c524a3dbba60f7f11f395d1635,
+  c0262215d494b551d059395d504966afa60e1ec88e6f4ea7f1f286439ff6433e,
   389120 bytes.
 
 The container has no makepkg, so the Arch package was syntax-checked but not
