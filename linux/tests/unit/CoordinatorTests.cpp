@@ -12,6 +12,7 @@ class CoordinatorTests final : public QObject {
 
 private slots:
   void staleCallbacksCannotOverrideLatestIntent();
+  void releaseFailureDoesNotRemainStuckRestoring();
   void deterministicRandomizedSequencesPreserveInvariants();
 };
 
@@ -59,6 +60,32 @@ void CoordinatorTests::staleCallbacksCannotOverrideLatestIntent() {
   QCOMPARE(status.value(QStringLiteral("protocolOwnership")).toString(), QStringLiteral("owned"));
   QVERIFY(status.value(QStringLiteral("effectiveFilterEnabled")).toBool());
   QVERIFY(!status.value(QStringLiteral("requestProcessed")).toBool());
+}
+
+void CoordinatorTests::releaseFailureDoesNotRemainStuckRestoring() {
+  QTemporaryDir temporary;
+  QVERIFY(temporary.isValid());
+  qputenv("XDG_CONFIG_HOME", temporary.filePath(QStringLiteral("config")).toUtf8());
+  qputenv("XDG_STATE_HOME", temporary.filePath(QStringLiteral("state")).toUtf8());
+  qputenv("XDG_RUNTIME_DIR", temporary.filePath(QStringLiteral("runtime")).toUtf8());
+  AppController controller(false);
+
+  controller.setFilterEnabled(true);
+  const qulonglong enabled = controller.status().value(QStringLiteral("requestedGeneration")).toULongLong();
+  QVERIFY(QMetaObject::invokeMethod(&controller, "onApplied", Qt::DirectConnection,
+                                    Q_ARG(qulonglong, enabled)));
+  controller.setFilterEnabled(false);
+  const qulonglong released = controller.status().value(QStringLiteral("requestedGeneration")).toULongLong();
+  QVERIFY(QMetaObject::invokeMethod(&controller, "onBackendFailed", Qt::DirectConnection,
+                                    Q_ARG(qulonglong, released),
+                                    Q_ARG(QString, QStringLiteral("release acknowledgement timed out"))));
+
+  const QVariantMap status = controller.status();
+  QVERIFY(!status.value(QStringLiteral("desiredFilterEnabled")).toBool());
+  QVERIFY(!status.value(QStringLiteral("effectiveFilterEnabled")).toBool());
+  QCOMPARE(status.value(QStringLiteral("protocolOwnership")).toString(), QStringLiteral("none"));
+  QCOMPARE(status.value(QStringLiteral("runtimeState")).toString(), QStringLiteral("degraded"));
+  QVERIFY(status.value(QStringLiteral("attentionMessage")).toString().contains(QStringLiteral("timed out")));
 }
 
 void CoordinatorTests::deterministicRandomizedSequencesPreserveInvariants() {

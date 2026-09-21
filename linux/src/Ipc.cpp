@@ -2,6 +2,7 @@
 
 #include "AppController.h"
 
+#include <QDBusArgument>
 #include <QDBusInterface>
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
@@ -169,7 +170,25 @@ bool ipcCall(const QString &method, const QVariantList &arguments, QVariant *rep
     if (error != nullptr) *error = message.errorMessage();
     return false;
   }
-  if (reply != nullptr && !message.arguments().isEmpty()) *reply = message.arguments().constFirst();
+  if (reply != nullptr) {
+    if (message.arguments().isEmpty()) {
+      if (error != nullptr) *error = QStringLiteral("resident returned an empty D-Bus reply");
+      return false;
+    }
+    const QVariant value = message.arguments().constFirst();
+    if (method == QStringLiteral("GetStatus")) {
+      if (value.metaType() == QMetaType::fromType<QDBusArgument>()) {
+        *reply = QVariant::fromValue(qdbus_cast<QVariantMap>(value));
+      } else if (value.canConvert<QVariantMap>()) {
+        *reply = value.toMap();
+      } else {
+        if (error != nullptr) *error = QStringLiteral("resident returned an invalid status payload");
+        return false;
+      }
+    } else {
+      *reply = value;
+    }
+  }
   return true;
 }
 

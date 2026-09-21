@@ -115,7 +115,12 @@ void WaylandBackend::apply(ColorMatrix matrix, qulonglong generation) {
 
 void WaylandBackend::release(qulonglong generation) {
   invalidateBefore(generation);
+  const bool hadManager = manager_ != nullptr;
   destroyManager();
+  if (hadManager && display_ != nullptr && !waitForSync(500)) {
+    reportFailure(QStringLiteral("CTM release was not processed within 500 ms"), generation);
+    return;
+  }
   emit released(generation);
 }
 

@@ -746,7 +746,15 @@ void AppController::onBlocked(qulonglong generation, QString reason) {
 void AppController::onBackendFailed(qulonglong generation, QString reason) {
   if (generation != 0 && generation != generation_) return;
   if (quitting_) return;
-  if (!settings_.filterEnabled) return;
+  if (!settings_.filterEnabled) {
+    lastError_ = reason;
+    protocolOwned_ = false;
+    runtimeState_ = RuntimeState::Degraded;
+    setAttention(reason, true);
+    releaseSleepInhibitor();
+    publish();
+    return;
+  }
   lastError_ = reason;
   protocolOwned_ = false;
   runtimeState_ = managerVersion_ < 2 ? RuntimeState::Unsupported : RuntimeState::Degraded;
