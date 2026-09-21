@@ -21,7 +21,7 @@ inserted only after those exact commands execute.
   `6cb791c1710cdedfc59b3d48fd91cca997d1eabd`, with terms in
   `linux/protocols/NOTICE`.
 - Immutable Linux package source checkpoint:
-  `41579cc8b866626070c9048991907f3fb7cfb56f`; final branch commit and built
+  `3214b21a0a083a2cb1dc7b48c9703c41e595a23e`; final branch commit and built
   package hash remain pending verification.
 - Existing Mac application source changes: none.
 
