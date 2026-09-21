@@ -4,6 +4,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 
 namespace ember {
 
@@ -19,6 +20,9 @@ public:
 private:
   AppController *controller_;
   QPlainTextEdit *text_ = nullptr;
+  QPushButton *acceptCurrent_ = nullptr;
+  QPushButton *discardRecovery_ = nullptr;
+  QPushButton *replaceSettings_ = nullptr;
 };
 
 } // namespace ember

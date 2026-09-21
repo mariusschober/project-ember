@@ -2,6 +2,7 @@
 
 #include "Ipc.h"
 #include "core/Diagnostics.h"
+#include "core/Recovery.h"
 #include "core/Solar.h"
 #include "platform/WaylandBackend.h"
 #include "ui/DiagnosticsDialog.h"
@@ -12,16 +13,22 @@
 #include <QDateTime>
 #include <QDBusConnection>
 #include <QDBusMessage>
+#include <QDBusUnixFileDescriptor>
 #include <QDir>
 #include <QIcon>
 #include <QJsonDocument>
+#include <QLockFile>
 #include <QMenu>
 #include <QPainter>
 #include <QProcess>
+#include <QScopeGuard>
 #include <QSystemTrayIcon>
 #include <QTimeZone>
+#include <QStringList>
 
 #include <cmath>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace ember {
 
@@ -42,6 +49,18 @@ QIcon trayIcon(bool active, bool attention) {
   return QIcon(pixmap);
 }
 
+QString systemctlExecutable() {
+  const QByteArray override = qgetenv("EMBER_SYSTEMCTL");
+  return override.isEmpty() ? QStringLiteral("systemctl") : QString::fromLocal8Bit(override);
+}
+
+bool isolatedRootTestAllowed() {
+  if (qgetenv("EMBER_TEST_ALLOW_ROOT") != QByteArray("1")) return false;
+  const QString backlightRoot = QDir::cleanPath(QString::fromUtf8(qgetenv("EMBER_BACKLIGHT_ROOT")));
+  return !backlightRoot.isEmpty()
+      && backlightRoot.startsWith(QDir::cleanPath(QDir::tempPath()) + QLatin1Char('/'));
+}
+
 } // namespace
 
 AppController::AppController(bool guiEnabled, QObject *parent)
@@ -54,6 +73,10 @@ AppController::AppController(bool guiEnabled, QObject *parent)
   connect(&applyTimer_, &QTimer::timeout, this, &AppController::invokeApply);
   scheduleTimer_.setSingleShot(true);
   connect(&scheduleTimer_, &QTimer::timeout, this, &AppController::onScheduleTimer);
+  scheduleHealthTimer_.setInterval(5 * 60 * 1000);
+  connect(&scheduleHealthTimer_, &QTimer::timeout, this, &AppController::onScheduleHealthTimer);
+  backendRetryTimer_.setSingleShot(true);
+  connect(&backendRetryTimer_, &QTimer::timeout, this, &AppController::onBackendRetry);
   driftTimer_.setInterval(5000);
   connect(&driftTimer_, &QTimer::timeout, this, [this] {
     if (!backlightEngaged_) return;
@@ -63,30 +86,67 @@ AppController::AppController(bool guiEnabled, QObject *parent)
       recoveryPending_ = true;
       driftCorrections_.clear();
       driftTimer_.stop();
+      releaseSleepInhibitor();
       setAttention(QStringLiteral("Backlight Lock became unavailable; hardware recovery is pending"), true);
       publish();
       return;
     }
     int value = -1;
     QString error;
-    if (!backlight_.read(capability, &value, &error)) return;
-    if (value < static_cast<int>(std::floor(static_cast<double>(capability.maximum) * 0.97))) {
+    bool drifted = false;
+    if (!backlight_.read(capability, &value, &error)) {
+      setAttention(QStringLiteral("Backlight Lock stopped after readback failed: %1").arg(error), true);
+      (void)restoreHardwareAndJournal();
+      backlightEngaged_ = false;
+      driftTimer_.stop();
+      publish();
+      return;
+    }
+    drifted = value < static_cast<int>(std::floor(static_cast<double>(capability.maximum) * 0.97));
+    if (!drifted && capability.actualBrightnessAvailable) {
+      int actual = -1;
+      if (!backlight_.readActualBrightness(capability, &actual, &error)) {
+        setAttention(QStringLiteral("Backlight Lock stopped after actual-brightness readback failed: %1").arg(error), true);
+        (void)restoreHardwareAndJournal();
+        backlightEngaged_ = false;
+        driftTimer_.stop();
+        publish();
+        return;
+      }
+      drifted = actual < static_cast<int>(std::floor(static_cast<double>(capability.maximum) * 0.97));
+    }
+    if (backlightCapability_.automaticBrightnessAvailable) {
+      int automatic = -1;
+      if (!capability.automaticBrightnessAvailable
+          || !backlight_.readAutomaticBrightness(capability, &automatic, &error)) {
+        setAttention(QStringLiteral("Backlight Lock stopped because automatic-brightness state became unavailable: %1").arg(error), true);
+        (void)restoreHardwareAndJournal();
+        backlightEngaged_ = false;
+        driftTimer_.stop();
+        publish();
+        return;
+      }
+      drifted = drifted || automatic != 0;
+    }
+    if (drifted) {
       const qint64 now = QDateTime::currentMSecsSinceEpoch();
       while (!driftCorrections_.isEmpty() && driftCorrections_.front() < now - 60000) {
         driftCorrections_.removeFirst();
       }
       if (driftCorrections_.size() >= 3) {
         setAttention(QStringLiteral("Backlight Lock paused after repeated external brightness changes"), true);
+        (void)restoreHardwareAndJournal();
         backlightEngaged_ = false;
-        recoveryPending_ = true;
         driftTimer_.stop();
         publish();
         return;
       }
-      if (!backlight_.write(capability, capability.maximum, &error)) {
+      const bool automaticCorrected = !backlightCapability_.automaticBrightnessAvailable
+          || backlight_.writeAutomaticBrightness(capability, 0, &error);
+      if (!automaticCorrected || !backlight_.write(capability, capability.maximum, &error)) {
         setAttention(QStringLiteral("Backlight Lock stopped after a failed correction: %1").arg(error), true);
+        (void)restoreHardwareAndJournal();
         backlightEngaged_ = false;
-        recoveryPending_ = true;
         driftTimer_.stop();
         publish();
       } else {
@@ -98,9 +158,15 @@ AppController::AppController(bool guiEnabled, QObject *parent)
 
 AppController::~AppController() {
   scheduleTimer_.stop();
+  scheduleHealthTimer_.stop();
+  backendRetryTimer_.stop();
   applyTimer_.stop();
   driftTimer_.stop();
-  persistNow();
+  releaseSleepInhibitor();
+  if (started_) {
+    unregisterIpc();
+    persistNow();
+  }
   if (wayland_ != nullptr && waylandThread_.isRunning()) {
     QMetaObject::invokeMethod(wayland_, [backend = wayland_] { backend->stop(); }, Qt::BlockingQueuedConnection);
     waylandThread_.quit();
@@ -111,20 +177,50 @@ AppController::~AppController() {
 
 bool AppController::start(QString *error) {
   if (started_) return true;
+  if (geteuid() == 0 && !isolatedRootTestAllowed()) {
+    if (error != nullptr) *error = QStringLiteral("refusing to start a graphical display controller as root");
+    return false;
+  }
+  if (!ensurePrivateDirectory(paths_.runtimeDir, error)) return false;
+  controllerLock_ = std::make_unique<QLockFile>(paths_.controllerLockFile);
+  controllerLock_->setStaleLockTime(5000);
+  if (!controllerLock_->tryLock(0)) {
+    if (error != nullptr) *error = QStringLiteral("another Project Ember controller or recovery helper owns this user session");
+    controllerLock_.reset();
+    return false;
+  }
+  // Reserve the single-controller name before reading recovery state or
+  // touching hardware. A duplicate launch must be side-effect free.
+  if (!registerIpc(this, &ipcAdaptor_, error)) {
+    controllerLock_.reset();
+    return false;
+  }
 
   const SettingsLoadResult settingsResult = settingsStore_.load();
   if (settingsResult.kind == LoadKind::Loaded) {
     settings_ = settingsResult.settings;
   } else if (settingsResult.kind == LoadKind::Corrupt || settingsResult.kind == LoadKind::FutureSchema || settingsResult.kind == LoadKind::IoFailure) {
-    recoveryWarning_ = QStringLiteral("Saved settings were not used: %1").arg(settingsResult.detail);
+    settingsWarning_ = QStringLiteral("Saved settings were not used and were preserved: %1").arg(settingsResult.detail);
     settingsPersistenceBlocked_ = true;
     settings_ = Settings::defaults();
   }
 
+  QByteArray safetyLatch;
+  QString safetyLatchError;
+  if (readRegularPrivateFile(paths_.safetyLatchFile, &safetyLatch, &safetyLatchError)) {
+    settings_.automationPaused = true;
+    settings_.filterEnabled = false;
+  } else if (safetyLatchError != QStringLiteral("not found")) {
+    settings_.automationPaused = true;
+    settings_.filterEnabled = false;
+    recoveryWarning_ = QStringLiteral("Automation safety state could not be verified: %1").arg(safetyLatchError);
+  }
+
   const RecoveryLoadResult recovery = journal_.load();
   if (recovery.kind == LoadKind::Loaded) {
+    recoveryUnreadable_ = false;
     RecoveryRecord record = recovery.record;
-    if (record.hardware.has_value()) {
+    if (recoveryRecordHasPendingFields(record)) {
       QString restoreError;
       if (backlight_.restore(&record, &restoreError)) {
         QString clearError;
@@ -134,14 +230,18 @@ bool AppController::start(QString *error) {
         }
       } else {
         recoveryPending_ = true;
-        record.hardware->unresolved = true;
-        record.hardware->error = restoreError;
         QString saveError;
-        (void)journal_.save(record, &saveError);
+        if (!journal_.save(record, &saveError) && !saveError.isEmpty()) {
+          restoreError += QStringLiteral("; updated recovery evidence could not be saved: %1").arg(saveError);
+        }
         recoveryWarning_ = QStringLiteral("Hardware recovery remains pending: %1").arg(restoreError);
       }
     } else {
-      (void)journal_.clear();
+      QString clearError;
+      if (!journal_.clear(&clearError)) {
+        recoveryPending_ = true;
+        recoveryWarning_ = QStringLiteral("Completed recovery evidence could not be cleared: %1").arg(clearError);
+      }
     }
     // A restart after an unclean exit never automatically re-engages a saved
     // filter or maximum hardware brightness. Explicit user action is required.
@@ -151,20 +251,37 @@ bool AppController::start(QString *error) {
     }
   } else if (recovery.kind == LoadKind::Corrupt || recovery.kind == LoadKind::FutureSchema || recovery.kind == LoadKind::IoFailure) {
     recoveryWarning_ = QStringLiteral("Recovery journal was not treated as empty: %1").arg(recovery.detail);
+    recoveryUnreadable_ = true;
     if (recovery.kind == LoadKind::Corrupt) {
       QString quarantinePath;
-      (void)journal_.quarantine(&quarantinePath);
+      QString quarantineError;
+      if (!journal_.quarantine(&quarantinePath, &quarantineError) && !quarantineError.isEmpty()) {
+        recoveryWarning_ += QStringLiteral("; quarantine failed: %1").arg(quarantineError);
+      }
     }
     settings_.filterEnabled = false;
     settings_.automationPaused = true;
     recoveryPending_ = true;
   }
-  (void)unlink(paths_.cleanExitFile.toUtf8().constData());
+  QString cleanMarkerError;
+  if (!removeDurableFile(paths_.cleanExitFile, &cleanMarkerError)) {
+    settings_.filterEnabled = false;
+    settings_.automationPaused = true;
+    recoveryWarning_ = QStringLiteral("A prior clean-exit marker could not be consumed safely: %1").arg(cleanMarkerError);
+  }
   persistNow();
 
-  loginRegistered_ = loginIsRegistered();
-  if (!registerIpc(this, &ipcAdaptor_, error)) return false;
+  // This probe is read-only and does not open Wayland or mutate hardware.
+  backlightCapability_ = backlight_.probe();
 
+  loginRegistered_ = loginIsRegistered();
+  if (settings_.sunScheduleEnabled && !loginRegistered_) {
+    if (!setLoginRegistration(true)) {
+      setAttention(QStringLiteral("Sun schedule is active for this session only because launch-at-login could not be registered"));
+    }
+  } else {
+    settings_.launchAtLogin = loginRegistered_;
+  }
   if (guiEnabled_) {
     createTray();
     createDialogs();
@@ -172,9 +289,10 @@ bool AppController::start(QString *error) {
 
   QDBusConnection systemBus = QDBusConnection::systemBus();
   if (systemBus.isConnected()) {
-    (void)systemBus.connect(QStringLiteral("org.freedesktop.login1"), QStringLiteral("/org/freedesktop/login1"),
-                            QStringLiteral("org.freedesktop.login1.Manager"), QStringLiteral("PrepareForSleep"),
-                            this, SLOT(onPrepareForSleep(bool)));
+    sleepMonitoringAvailable_ = systemBus.connect(
+        QStringLiteral("org.freedesktop.login1"), QStringLiteral("/org/freedesktop/login1"),
+        QStringLiteral("org.freedesktop.login1.Manager"), QStringLiteral("PrepareForSleep"),
+        this, SLOT(onPrepareForSleep(bool)));
   }
 
   wayland_ = new WaylandBackend;
@@ -190,6 +308,11 @@ bool AppController::start(QString *error) {
   invokeProbe();
   started_ = true;
   if (settings_.sunScheduleEnabled && !settings_.automationPaused) scheduleFromLocation();
+  if (settings_.filterEnabled && runtimeState_ == RuntimeState::Off) {
+    ++generation_;
+    runtimeState_ = RuntimeState::Enabling;
+    invokeApply();
+  }
   publish();
   return true;
 }
@@ -212,6 +335,11 @@ void AppController::openDiagnostics() {
   diagnosticsDialog_->activateWindow();
 }
 
+qulonglong AppController::beginIpcRequest() {
+  ++lastAcceptedRequestId_;
+  return lastAcceptedRequestId_;
+}
+
 void AppController::setFilterEnabled(bool enabled) {
   if (settings_.sunScheduleEnabled && !settings_.automationPaused && settings_.location.has_value()) {
     const SolarSchedule schedule = solarSchedule(QDateTime::currentDateTime(), *settings_.location, QTimeZone::systemTimeZone());
@@ -224,10 +352,6 @@ void AppController::setFilterEnabled(bool enabled) {
 }
 
 void AppController::setFilterEnabledInternal(bool enabled, bool scheduleAction) {
-  if (enabled && !scheduleAction && settings_.automationPaused) {
-    settings_.automationPaused = false;
-    (void)unlink(paths_.safetyLatchFile.toUtf8().constData());
-  }
   if (settings_.filterEnabled == enabled &&
       ((enabled && (runtimeState_ == RuntimeState::CompositorControlled || runtimeState_ == RuntimeState::Enabling)) ||
        (!enabled && runtimeState_ == RuntimeState::Off))) {
@@ -245,9 +369,11 @@ void AppController::setFilterEnabledInternal(bool enabled, bool scheduleAction) 
   } else {
     runtimeState_ = RuntimeState::Restoring;
     applyTimer_.stop();
-    scheduleTimer_.stop();
     (void)restoreHardwareAndJournal();
     invokeRelease();
+  }
+  if (!scheduleAction && settings_.sunScheduleEnabled && !settings_.automationPaused) {
+    scheduleNextSolarBoundary();
   }
   persistSoon();
   publish();
@@ -292,12 +418,12 @@ void AppController::setBrightness(double brightness) {
 
 void AppController::setBacklightLock(bool enabled) {
   settings_.backlightLockEnabled = enabled;
-  if (!enabled && backlightEngaged_) {
+  if (!enabled && (backlightEngaged_ || recoveryPending_)) {
     const bool restored = restoreHardwareAndJournal();
     backlightEngaged_ = false;
     driftCorrections_.clear();
     driftTimer_.stop();
-    backlightCapability_ = {};
+    backlightCapability_ = backlight_.probe();
     if (!restored) publish();
   }
   if (enabled && settings_.filterEnabled && processedGeneration_ == generation_) {
@@ -311,22 +437,28 @@ void AppController::setSchedule(bool enabled) {
   settings_.sunScheduleEnabled = enabled;
   if (!enabled) {
     scheduleTimer_.stop();
+    scheduleHealthTimer_.stop();
     settings_.overrideExpiresAtMs.reset();
     persistSoon();
     publish();
     return;
   }
   const bool loginOk = setLoginRegistration(true);
-  if (!loginOk) setAttention(QStringLiteral("Sun schedule is session-only because launch-at-login could not be registered"));
   scheduleFromLocation();
+  if (!loginOk) {
+    setAttention(QStringLiteral("Sun schedule is active for this session only because launch-at-login could not be registered"));
+  } else if (settings_.location.has_value()) {
+    setAttention(QStringLiteral("Sun schedule enabled; Project Ember was also registered to launch with the graphical session"));
+  }
   persistSoon();
   publish();
 }
 
 void AppController::setLaunchAtLogin(bool enabled) {
   if (!setLoginRegistration(enabled)) {
-    settings_.launchAtLogin = false;
-    setAttention(QStringLiteral("Launch at login could not be registered for this graphical session"), true);
+    setAttention(enabled
+        ? QStringLiteral("Launch at login could not be registered for this graphical session")
+        : QStringLiteral("Launch at login could not be disabled; its previous state was preserved"), true);
   } else {
     clearAttention();
   }
@@ -349,10 +481,12 @@ void AppController::setLocation(double latitude, double longitude) {
     return;
   }
   settings_.location = Coordinate{std::round(latitude * 10.0) / 10.0, std::round(longitude * 10.0) / 10.0};
+  const bool replacedOverride = settings_.overrideExpiresAtMs.has_value();
   settings_.overrideExpiresAtMs.reset();
-  settings_.automationPaused = false;
-  recoveryWarning_.clear();
   if (settings_.sunScheduleEnabled) scheduleFromLocation();
+  if (replacedOverride) {
+    setAttention(QStringLiteral("Location changed; the old-location manual override was cleared and the schedule was reconciled"));
+  }
   persistSoon();
   publish();
 }
@@ -361,12 +495,140 @@ void AppController::clearLocation() {
   settings_.location.reset();
   settings_.overrideExpiresAtMs.reset();
   scheduleTimer_.stop();
+  scheduleHealthTimer_.stop();
   persistSoon();
+  publish();
+}
+
+void AppController::resumeAutomation() {
+  settings_.automationPaused = false;
+  QString latchError;
+  if (!removeDurableFile(paths_.safetyLatchFile, &latchError)) {
+    settings_.automationPaused = true;
+    setAttention(QStringLiteral("Automation could not be resumed because the safety latch could not be removed durably: %1").arg(latchError), true);
+  } else {
+    if (!recoveryPending_) recoveryWarning_.clear();
+    clearAttention();
+    if (settings_.sunScheduleEnabled) scheduleFromLocation();
+  }
+  persistSoon();
+  publish();
+}
+
+void AppController::acceptCurrentHardwareState() {
+  const RecoveryLoadResult loaded = journal_.load();
+  if (loaded.kind == LoadKind::NoFile) {
+    recoveryPending_ = false;
+    recoveryUnreadable_ = false;
+    recoveryWarning_.clear();
+    setAttention(QStringLiteral("No hardware recovery record is pending"));
+    publish();
+    return;
+  }
+  if (loaded.kind != LoadKind::Loaded) {
+    setAttention(QStringLiteral("The recovery record is unreadable and cannot be resolved automatically; preserve it for inspection"), true);
+    recoveryPending_ = true;
+    recoveryUnreadable_ = true;
+    publish();
+    return;
+  }
+  RecoveryRecord record = loaded.record;
+  recoveryUnreadable_ = false;
+  const BacklightCapability capability = backlight_.probe();
+  QStringList unresolved;
+  if (record.hardware.has_value()) {
+    int current = -1;
+    QString readError;
+    if (capability.available && capability.deviceId == record.hardware->deviceId
+        && backlight_.read(capability, &current, &readError)) {
+      record.hardware.reset();
+    } else {
+      unresolved.append(readError.isEmpty() ? QStringLiteral("brightness identity is unavailable") : readError);
+    }
+  }
+  if (record.automaticBrightness.has_value()) {
+    int current = -1;
+    QString readError;
+    if (capability.available && capability.deviceId == record.automaticBrightness->deviceId
+        && capability.automaticBrightnessAvailable
+        && capability.automaticBrightnessProvider == record.automaticBrightness->provider
+        && backlight_.readAutomaticBrightness(capability, &current, &readError)) {
+      record.automaticBrightness.reset();
+    } else {
+      unresolved.append(readError.isEmpty() ? QStringLiteral("automatic-brightness identity is unavailable") : readError);
+    }
+  }
+  QString journalError;
+  if (recoveryRecordHasPendingFields(record)) {
+    recoveryPending_ = true;
+    if (!journal_.save(record, &journalError)) unresolved.append(journalError);
+    setAttention(QStringLiteral("Only identity-verified current hardware state was accepted; recovery remains pending: %1")
+                     .arg(unresolved.join(QStringLiteral("; "))), true);
+  } else if (!journal_.clear(&journalError)) {
+    recoveryPending_ = true;
+    setAttention(QStringLiteral("Current hardware state was verified, but recovery evidence could not be cleared: %1").arg(journalError), true);
+  } else {
+    recoveryPending_ = false;
+    recoveryWarning_.clear();
+    setAttention(QStringLiteral("Current identity-verified hardware state was accepted; no hardware value was changed"));
+  }
+  publish();
+}
+
+void AppController::discardUnreadableRecoveryEvidence() {
+  if (!recoveryUnreadable_) {
+    setAttention(QStringLiteral("Recovery evidence is readable; use verified restore or keep-current resolution instead"));
+    publish();
+    return;
+  }
+  QString error;
+  if (!journal_.discardUnreadable(&error)) {
+    recoveryPending_ = true;
+    setAttention(QStringLiteral("Unreadable recovery evidence was preserved because explicit discard failed: %1").arg(error), true);
+    publish();
+    return;
+  }
+  settings_.filterEnabled = false;
+  settings_.backlightLockEnabled = false;
+  settings_.automationPaused = true;
+  QString latchError;
+  if (!writeDurableFile(paths_.safetyLatchFile, QByteArray("paused\n"), 0600, &latchError)) {
+    recoveryPending_ = true;
+    setAttention(QStringLiteral("Recovery evidence was discarded, but the safety pause could not be persisted: %1").arg(latchError), true);
+    publish();
+    return;
+  }
+  recoveryPending_ = false;
+  recoveryUnreadable_ = false;
+  recoveryWarning_.clear();
+  setAttention(QStringLiteral("Unreadable recovery evidence was explicitly discarded; current hardware was not changed and Sun automation remains paused"));
+  persistSoon();
+  publish();
+}
+
+void AppController::replaceUnreadableSettings() {
+  if (!settingsPersistenceBlocked_) {
+    setAttention(QStringLiteral("Saved settings are already readable"));
+    publish();
+    return;
+  }
+  QString error;
+  if (!settingsStore_.save(settings_, &error)) {
+    setAttention(QStringLiteral("Unreadable settings were preserved because replacement failed: %1").arg(error), true);
+    publish();
+    return;
+  }
+  settingsPersistenceBlocked_ = false;
+  settingsWarning_.clear();
+  setAttention(QStringLiteral("The unreadable settings file was explicitly replaced with the current safe settings"));
   publish();
 }
 
 void AppController::retry() {
   lastError_.clear();
+  backlightCapability_ = backlight_.probe();
+  backendRetryAttempts_ = 0;
+  backendRetryTimer_.stop();
   if (settings_.filterEnabled) {
     ++generation_;
     runtimeState_ = RuntimeState::Enabling;
@@ -384,11 +646,17 @@ void AppController::restore() {
   settings_.backlightLockEnabled = false;
   settings_.overrideExpiresAtMs.reset();
   settings_.automationPaused = true;
-  (void)writeDurableFile(paths_.safetyLatchFile, QByteArray("paused\n"), 0600);
+  QString latchError;
+  if (!writeDurableFile(paths_.safetyLatchFile, QByteArray("paused\n"), 0600, &latchError)) {
+    recoveryPending_ = true;
+    setAttention(QStringLiteral("Emergency restore could not persist its automation safety latch: %1").arg(latchError), true);
+  }
   ++generation_;
   applyTimer_.stop();
   runtimeState_ = RuntimeState::Restoring;
   scheduleTimer_.stop();
+  scheduleHealthTimer_.stop();
+  backendRetryTimer_.stop();
   (void)restoreHardwareAndJournal();
   invokeRelease();
   persistSoon();
@@ -398,11 +666,12 @@ void AppController::restore() {
 void AppController::quit() {
   if (quitting_) return;
   quitting_ = true;
-  settings_.filterEnabled = false;
   ++generation_;
   applyTimer_.stop();
   runtimeState_ = RuntimeState::Restoring;
   scheduleTimer_.stop();
+  scheduleHealthTimer_.stop();
+  backendRetryTimer_.stop();
   (void)restoreHardwareAndJournal();
   invokeRelease();
   persistNow();
@@ -413,18 +682,31 @@ void AppController::quit() {
 }
 
 void AppController::onCapabilityChanged(bool waylandAvailable, int managerVersion, int outputCount, QString reason) {
+  const bool lostControllingCapability = settings_.filterEnabled && managerVersion_ >= 2
+      && (!waylandAvailable || managerVersion < 2);
   waylandAvailable_ = waylandAvailable;
   managerVersion_ = managerVersion;
   outputCount_ = outputCount;
   capabilityReason_ = reason;
   if (!waylandAvailable_ || managerVersion_ < 2) {
+    protocolOwned_ = false;
     if (settings_.filterEnabled) {
+      if (lostControllingCapability && backlightEngaged_) {
+        (void)restoreHardwareAndJournal();
+        backlightEngaged_ = false;
+        driftCorrections_.clear();
+        driftTimer_.stop();
+      }
       runtimeState_ = RuntimeState::Unsupported;
       setAttention(reason.isEmpty() ? QStringLiteral("Hyprland CTM v2 is unavailable") : reason, true);
+      scheduleBackendRetry();
     }
   } else if (!settings_.filterEnabled && runtimeState_ == RuntimeState::Unsupported) {
     runtimeState_ = RuntimeState::Off;
     clearAttention();
+  } else if (managerVersion_ >= 2) {
+    backendRetryAttempts_ = 0;
+    backendRetryTimer_.stop();
   }
   publish();
 }
@@ -432,8 +714,11 @@ void AppController::onCapabilityChanged(bool waylandAvailable, int managerVersio
 void AppController::onApplied(qulonglong generation) {
   if (generation != generation_ || !settings_.filterEnabled || quitting_) return;
   processedGeneration_ = generation;
+  protocolOwned_ = true;
   pixelsVerified_ = false;
   runtimeState_ = RuntimeState::CompositorControlled;
+  backendRetryAttempts_ = 0;
+  backendRetryTimer_.stop();
   lastError_.clear();
   clearAttention();
   if (settings_.backlightLockEnabled) (void)captureAndEngageBacklight();
@@ -441,19 +726,27 @@ void AppController::onApplied(qulonglong generation) {
   publish();
 }
 
-void AppController::onBlocked(QString reason) {
+void AppController::onBlocked(qulonglong generation, QString reason) {
+  if (generation != 0 && generation != generation_) return;
+  if (!settings_.filterEnabled || quitting_) return;
   runtimeState_ = RuntimeState::Blocked;
-  lastError_ = reason;
-  setAttention(QStringLiteral("Blocked by another color controller. Release it, then choose Retry."), true);
+  protocolOwned_ = false;
+  capabilityReason_ = reason;
+  lastError_ = QStringLiteral("Blocked by another color controller. Release it, then choose Retry.");
+  setAttention(lastError_, true);
+  if (backlightEngaged_) (void)restoreHardwareAndJournal();
   backlightEngaged_ = false;
   driftCorrections_.clear();
   driftTimer_.stop();
   publish();
 }
 
-void AppController::onBackendFailed(QString reason) {
+void AppController::onBackendFailed(qulonglong generation, QString reason) {
+  if (generation != 0 && generation != generation_) return;
   if (quitting_) return;
+  if (!settings_.filterEnabled) return;
   lastError_ = reason;
+  protocolOwned_ = false;
   runtimeState_ = managerVersion_ < 2 ? RuntimeState::Unsupported : RuntimeState::Degraded;
   setAttention(reason, true);
   if (backlightEngaged_) {
@@ -462,6 +755,7 @@ void AppController::onBackendFailed(QString reason) {
     driftCorrections_.clear();
     driftTimer_.stop();
   }
+  scheduleBackendRetry();
   publish();
 }
 
@@ -473,7 +767,9 @@ void AppController::onTopologyChanged() {
   publish();
 }
 
-void AppController::onReleased() {
+void AppController::onReleased(qulonglong generation) {
+  if (generation != generation_) return;
+  protocolOwned_ = false;
   if (sleepRestoreInFlight_) {
     sleepRestoreInFlight_ = false;
     runtimeState_ = RuntimeState::Suspended;
@@ -483,24 +779,46 @@ void AppController::onReleased() {
   backlightEngaged_ = false;
   driftCorrections_.clear();
   driftTimer_.stop();
+  releaseSleepInhibitor();
   publish();
 }
 
 void AppController::onScheduleTimer() { reconcileSchedule(); }
 
+void AppController::onScheduleHealthTimer() { reconcileSchedule(); }
+
+void AppController::onBackendRetry() {
+  if (!settings_.filterEnabled || quitting_) return;
+  ++generation_;
+  runtimeState_ = RuntimeState::Enabling;
+  invokeProbe();
+  invokeApply();
+  publish();
+}
+
 void AppController::onPrepareForSleep(bool sleeping) {
   if (sleeping) {
     sleepWasDesired_ = settings_.filterEnabled;
     if (settings_.filterEnabled) {
+      ++generation_;
       runtimeState_ = RuntimeState::Restoring;
       sleepRestoreInFlight_ = true;
-      (void)restoreHardwareAndJournal();
-      invokeRelease();
+      const bool hardwareRestored = restoreHardwareAndJournal();
+      releaseSleepInhibitor();
+      if (hardwareRestored) {
+        invokeRelease();
+      } else {
+        sleepRestoreInFlight_ = false;
+        runtimeState_ = RuntimeState::Degraded;
+        setAttention(QStringLiteral("Hardware recovery did not verify before sleep; Ember did not intentionally release its software dimming owner"), true);
+      }
       publish();
     }
     return;
   }
-  if (sleepWasDesired_ && settings_.filterEnabled && !settings_.automationPaused) {
+  if (settings_.sunScheduleEnabled && !settings_.automationPaused && settings_.location.has_value()) {
+    reconcileSchedule();
+  } else if (sleepWasDesired_ && settings_.filterEnabled) {
     ++generation_;
     applyTimer_.stop();
     runtimeState_ = RuntimeState::Enabling;
@@ -513,13 +831,16 @@ void AppController::onPrepareForSleep(bool sleeping) {
   sleepWasDesired_ = false;
 }
 
-void AppController::flushSettings() { persistNow(); }
+void AppController::flushSettings() {
+  const QString previousError = settingsSaveError_;
+  persistNow();
+  if (settingsSaveError_ != previousError) publish();
+}
 
 void AppController::updateTray() {
   if (tray_ == nullptr) return;
   const QVariantMap current = status();
-  const bool active = current.value(QStringLiteral("filterEnabled")).toBool()
-      && current.value(QStringLiteral("protocolOwnership")).toString() == QStringLiteral("compositor_controlled");
+  const bool active = current.value(QStringLiteral("effectiveFilterEnabled")).toBool();
   const bool attention = current.value(QStringLiteral("attentionSeverity")).toString() == QStringLiteral("error");
   tray_->setIcon(trayIcon(active, attention));
   tray_->setToolTip(QStringLiteral("Project Ember — %1").arg(current.value(QStringLiteral("statusTitle")).toString()));
@@ -527,7 +848,6 @@ void AppController::updateTray() {
 }
 
 void AppController::createTray() {
-  if (!QSystemTrayIcon::isSystemTrayAvailable()) return;
   tray_ = new QSystemTrayIcon(this);
   trayMenu_ = new QMenu;
   settingsAction_ = trayMenu_->addAction(QStringLiteral("Settings…"));
@@ -543,7 +863,7 @@ void AppController::createTray() {
   connect(quitAction_, &QAction::triggered, this, &AppController::quit);
   connect(tray_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
     if (reason == QSystemTrayIcon::Context) return;
-    if (reason != QSystemTrayIcon::Trigger && reason != QSystemTrayIcon::DoubleClick) return;
+    if (reason != QSystemTrayIcon::Trigger) return;
     if (settings_.primaryAction == PrimaryAction::OpenControls) openSettings();
     else setFilterEnabled(!settings_.filterEnabled);
   });
@@ -564,15 +884,18 @@ void AppController::invokeApply() {
   if (wayland_ == nullptr) return;
   const ColorMatrix matrix = matrixFor(settings_);
   const qulonglong generation = generation_;
+  wayland_->invalidateBefore(generation);
   QMetaObject::invokeMethod(wayland_, [backend = wayland_, matrix, generation] { backend->apply(matrix, generation); }, Qt::QueuedConnection);
 }
 
 void AppController::invokeRelease() {
   if (wayland_ == nullptr) {
-    onReleased();
+    onReleased(generation_);
     return;
   }
-  QMetaObject::invokeMethod(wayland_, [backend = wayland_] { backend->release(); }, Qt::QueuedConnection);
+  const qulonglong generation = generation_;
+  wayland_->invalidateBefore(generation);
+  QMetaObject::invokeMethod(wayland_, [backend = wayland_, generation] { backend->release(generation); }, Qt::QueuedConnection);
 }
 
 void AppController::invokeStop() {
@@ -581,7 +904,12 @@ void AppController::invokeStop() {
 }
 
 void AppController::scheduleFromLocation() {
-  if (!settings_.sunScheduleEnabled || settings_.automationPaused) return;
+  if (!settings_.sunScheduleEnabled || settings_.automationPaused) {
+    scheduleTimer_.stop();
+    scheduleHealthTimer_.stop();
+    return;
+  }
+  scheduleHealthTimer_.start();
   if (!settings_.location.has_value()) {
     scheduleTimer_.stop();
     setAttention(QStringLiteral("Sun schedule is waiting for an approximate latitude and longitude"));
@@ -594,17 +922,25 @@ void AppController::scheduleFromLocation() {
 void AppController::reconcileSchedule() {
   if (!settings_.sunScheduleEnabled || settings_.automationPaused || !settings_.location.has_value()) {
     scheduleTimer_.stop();
+    scheduleHealthTimer_.stop();
     publish();
     return;
   }
   const QDateTime now = QDateTime::currentDateTime();
+  bool overrideExpired = false;
   if (settings_.overrideExpiresAtMs.has_value() && now.toMSecsSinceEpoch() >= *settings_.overrideExpiresAtMs) {
     settings_.overrideExpiresAtMs.reset();
+    overrideExpired = true;
   }
   const SolarSchedule schedule = solarSchedule(now, *settings_.location, QTimeZone::systemTimeZone());
   const bool target = settings_.overrideExpiresAtMs.has_value() ? settings_.overrideFilterEnabled : schedule.isNight;
-  if (settings_.filterEnabled != target) setFilterEnabledInternal(target, true);
+  if (settings_.filterEnabled != target
+      || (target && runtimeState_ != RuntimeState::CompositorControlled && runtimeState_ != RuntimeState::Enabling)) {
+    setFilterEnabledInternal(target, true);
+  }
   scheduleNextSolarBoundary();
+  if (!scheduleHealthTimer_.isActive()) scheduleHealthTimer_.start();
+  if (overrideExpired) persistSoon();
   publish();
 }
 
@@ -622,6 +958,13 @@ void AppController::scheduleNextSolarBoundary() {
   scheduleTimer_.start(static_cast<int>(std::min<qint64>(delay, 24LL * 60LL * 60LL * 1000LL)));
 }
 
+void AppController::scheduleBackendRetry() {
+  if (!settings_.filterEnabled || quitting_ || backendRetryTimer_.isActive() || backendRetryAttempts_ >= 5) return;
+  const int delayMs = 1000 * (1 << backendRetryAttempts_);
+  ++backendRetryAttempts_;
+  backendRetryTimer_.start(delayMs);
+}
+
 void AppController::setAttention(const QString &message, bool error) {
   attentionMessage_ = message;
   attentionError_ = error;
@@ -636,14 +979,13 @@ void AppController::scheduleApply() {
 }
 
 void AppController::clearAttention() {
-  if (recoveryWarning_.isEmpty()) {
+  if (recoveryWarning_.isEmpty() && settingsWarning_.isEmpty()) {
     attentionMessage_.clear();
     attentionError_ = false;
   }
 }
 
 void AppController::persistSoon() {
-  settingsPersistenceBlocked_ = false;
   persistTimer_.start();
 }
 
@@ -651,48 +993,69 @@ void AppController::persistNow() {
   if (settingsPersistenceBlocked_) return;
   QString error;
   if (!settingsStore_.save(settings_, &error)) {
-    lastError_ = QStringLiteral("Settings could not be saved: %1").arg(error);
+    settingsSaveError_ = QStringLiteral("Settings could not be saved: %1").arg(error);
+  } else {
+    settingsSaveError_.clear();
   }
 }
 
 bool AppController::restoreHardwareAndJournal() {
+  const auto inhibitorGuard = qScopeGuard([this] { releaseSleepInhibitor(); });
   const RecoveryLoadResult result = journal_.load();
   if (result.kind == LoadKind::NoFile) {
     recoveryPending_ = false;
+    recoveryUnreadable_ = false;
+    recoveryWarning_.clear();
     return true;
   }
   if (result.kind != LoadKind::Loaded) {
     recoveryPending_ = true;
+    recoveryUnreadable_ = true;
+    recoveryWarning_ = QStringLiteral("Hardware recovery evidence could not be read: %1").arg(result.detail);
     return false;
   }
   RecoveryRecord record = result.record;
-  if (!record.hardware.has_value()) {
+  recoveryUnreadable_ = false;
+  if (!recoveryRecordHasPendingFields(record)) {
+    QString clearError;
+    if (!journal_.clear(&clearError)) {
+      recoveryPending_ = true;
+      recoveryWarning_ = QStringLiteral("Completed hardware recovery evidence could not be cleared: %1").arg(clearError);
+      return false;
+    }
     recoveryPending_ = false;
-    (void)journal_.clear();
+    recoveryUnreadable_ = false;
+    recoveryWarning_.clear();
     return true;
   }
   QString error;
   if (!backlight_.restore(&record, &error)) {
     recoveryPending_ = true;
-    record.hardware->unresolved = true;
-    record.hardware->error = error;
     QString saveError;
-    (void)journal_.save(record, &saveError);
+    if (!journal_.save(record, &saveError) && !saveError.isEmpty()) {
+      error += QStringLiteral("; updated recovery evidence could not be saved: %1").arg(saveError);
+    }
     recoveryWarning_ = QStringLiteral("Hardware restore needs attention: %1").arg(error);
     return false;
   }
   recoveryPending_ = false;
+  recoveryUnreadable_ = false;
   QString clearError;
   if (!journal_.clear(&clearError)) {
     recoveryPending_ = true;
     recoveryWarning_ = QStringLiteral("Hardware restored but journal cleanup failed: %1").arg(clearError);
     return false;
   }
+  recoveryWarning_.clear();
   return true;
 }
 
 bool AppController::captureAndEngageBacklight() {
   if (backlightEngaged_) return true;
+  if (recoveryPending_) {
+    setAttention(QStringLiteral("Backlight Lock is blocked until the pending hardware recovery evidence is resolved"), true);
+    return false;
+  }
   backlightCapability_ = backlight_.probe();
   if (!backlightCapability_.available) {
     setAttention(QStringLiteral("Backlight Lock unavailable: %1").arg(backlightCapability_.reason));
@@ -708,60 +1071,163 @@ bool AppController::captureAndEngageBacklight() {
     setAttention(QStringLiteral("Backlight Lock could not capture the current brightness: %1").arg(error), true);
     return false;
   }
+  const QString bootId = hashBootId();
+  const QString sessionId = hashSessionId();
+  if (bootId.isEmpty() || sessionId.isEmpty()) {
+    setAttention(QStringLiteral("Backlight Lock requires verified boot and graphical-session identity (XDG_SESSION_ID) for crash recovery"), true);
+    return false;
+  }
+  if (backlightCapability_.devicePath.startsWith(QStringLiteral("/sys/")) && !sleepMonitoringAvailable_) {
+    setAttention(QStringLiteral("Backlight Lock requires a working logind PrepareForSleep subscription"), true);
+    return false;
+  }
+  if (!acquireSleepInhibitor(&error)) {
+    setAttention(QStringLiteral("Backlight Lock requires a bounded logind sleep-delay inhibitor: %1").arg(error), true);
+    return false;
+  }
+  bool keepInhibitor = false;
+  const auto inhibitorGuard = qScopeGuard([this, &keepInhibitor] {
+    if (!keepInhibitor) releaseSleepInhibitor();
+  });
   RecoveryRecord record;
   record.createdAtMs = QDateTime::currentMSecsSinceEpoch();
   record.safetyPaused = false;
-  record.hardware = HardwareRecord{
-      backlightCapability_.deviceId,
-      backlightCapability_.devicePath,
-      hashBootId(),
-      original,
-      backlightCapability_.maximum,
-      backlightCapability_.maximum,
-      true,
-      QString(),
-  };
+  HardwareRecord hardware;
+  hardware.deviceId = backlightCapability_.deviceId;
+  hardware.devicePath = backlightCapability_.devicePath;
+  hardware.bootIdHash = bootId;
+  hardware.sessionIdHash = sessionId;
+  hardware.originalBrightness = original;
+  hardware.lastWrittenBrightness = backlightCapability_.maximum;
+  hardware.maximumBrightness = backlightCapability_.maximum;
+  hardware.unresolved = true;
+  record.hardware = hardware;
+  if (backlightCapability_.automaticBrightnessAvailable) {
+    int automatic = -1;
+    if (!backlight_.readAutomaticBrightness(backlightCapability_, &automatic, &error)) {
+      setAttention(QStringLiteral("Backlight Lock could not capture automatic-brightness state: %1").arg(error), true);
+      return false;
+    }
+    if (automatic == 1) {
+      AutomaticBrightnessRecord automaticRecord;
+      automaticRecord.deviceId = backlightCapability_.deviceId;
+      automaticRecord.devicePath = backlightCapability_.devicePath;
+      automaticRecord.provider = backlightCapability_.automaticBrightnessProvider;
+      automaticRecord.bootIdHash = bootId;
+      automaticRecord.sessionIdHash = sessionId;
+      automaticRecord.originalValue = 1;
+      automaticRecord.lastWrittenValue = 0;
+      automaticRecord.unresolved = true;
+      record.automaticBrightness = automaticRecord;
+    }
+  }
   // The immutable baseline is durable before the maximum-brightness mutation.
   if (!journal_.save(record, &error)) {
     setAttention(QStringLiteral("Backlight Lock refused to change hardware because its recovery journal could not be saved: %1").arg(error), true);
+    return false;
+  }
+  if (record.automaticBrightness.has_value()
+      && !backlight_.writeAutomaticBrightness(backlightCapability_, 0, &error)) {
+    recoveryPending_ = true;
+    record.automaticBrightness->error = error;
+    (void)backlight_.restore(&record);
+    if (recoveryRecordHasPendingFields(record)) (void)journal_.save(record);
+    else (void)journal_.clear();
+    setAttention(QStringLiteral("Backlight Lock could not disable automatic brightness after journaling its baseline: %1").arg(error), true);
     return false;
   }
   if (!backlight_.write(backlightCapability_, backlightCapability_.maximum, &error)) {
     recoveryPending_ = true;
     record.hardware->unresolved = true;
     record.hardware->error = error;
-    (void)journal_.save(record);
+    QString rollbackError;
+    (void)backlight_.restore(&record, &rollbackError);
+    if (recoveryRecordHasPendingFields(record)) (void)journal_.save(record);
+    else (void)journal_.clear();
     setAttention(QStringLiteral("Backlight Lock failed after journaling the baseline: %1").arg(error), true);
     return false;
   }
   record.hardware->unresolved = false;
+  if (record.automaticBrightness.has_value()) record.automaticBrightness->unresolved = false;
   if (!journal_.save(record, &error)) {
     recoveryPending_ = true;
-    setAttention(QStringLiteral("Backlight Lock is engaged but its recovery record could not be updated: %1").arg(error), true);
+    QString rollbackError;
+    (void)backlight_.restore(&record, &rollbackError);
+    if (recoveryRecordHasPendingFields(record)) (void)journal_.save(record);
+    else (void)journal_.clear();
+    setAttention(QStringLiteral("Backlight Lock rolled back because its engaged recovery record could not be updated: %1").arg(error), true);
     return false;
   }
   backlightEngaged_ = true;
+  keepInhibitor = true;
   driftCorrections_.clear();
   recoveryPending_ = false;
   clearAttention();
   return true;
 }
 
+bool AppController::acquireSleepInhibitor(QString *error) {
+  if (sleepInhibitorFd_ >= 0) return true;
+  // Test backlights live outside sysfs and cannot involve the host logind.
+  if (!backlightCapability_.devicePath.startsWith(QStringLiteral("/sys/"))) return true;
+  const QDBusConnection bus = QDBusConnection::systemBus();
+  if (!bus.isConnected()) {
+    if (error != nullptr) *error = QStringLiteral("system D-Bus is unavailable");
+    return false;
+  }
+  QDBusMessage request = QDBusMessage::createMethodCall(
+      QStringLiteral("org.freedesktop.login1"), QStringLiteral("/org/freedesktop/login1"),
+      QStringLiteral("org.freedesktop.login1.Manager"), QStringLiteral("Inhibit"));
+  request.setArguments({QStringLiteral("sleep"), QStringLiteral("Project Ember"),
+                        QStringLiteral("Restore Backlight Lock before sleep"), QStringLiteral("delay")});
+  const QDBusMessage reply = bus.call(request, QDBus::Block, 1000);
+  if (reply.type() == QDBusMessage::ErrorMessage || reply.arguments().isEmpty()) {
+    if (error != nullptr) *error = reply.errorMessage().isEmpty() ? QStringLiteral("logind rejected the inhibitor") : reply.errorMessage();
+    return false;
+  }
+  const QDBusUnixFileDescriptor descriptor = qvariant_cast<QDBusUnixFileDescriptor>(reply.arguments().constFirst());
+  if (!descriptor.isValid()) {
+    if (error != nullptr) *error = QStringLiteral("logind returned an invalid inhibitor descriptor");
+    return false;
+  }
+  sleepInhibitorFd_ = fcntl(descriptor.fileDescriptor(), F_DUPFD_CLOEXEC, 3);
+  if (sleepInhibitorFd_ < 0) {
+    if (error != nullptr) *error = QStringLiteral("could not retain the sleep inhibitor");
+    return false;
+  }
+  return true;
+}
+
+void AppController::releaseSleepInhibitor() {
+  if (sleepInhibitorFd_ >= 0) {
+    (void)close(sleepInhibitorFd_);
+    sleepInhibitorFd_ = -1;
+  }
+}
+
 bool AppController::setLoginRegistration(bool enabled) {
   QProcess process;
   QStringList arguments = {QStringLiteral("--user"), enabled ? QStringLiteral("enable") : QStringLiteral("disable"), QStringLiteral("project-ember.service")};
-  process.start(QStringLiteral("systemctl"), arguments);
-  if (!process.waitForFinished(1500)) return false;
-  loginRegistered_ = enabled ? process.exitCode() == 0 : false;
-  if (!loginRegistered_ && enabled) settings_.launchAtLogin = false;
-  else settings_.launchAtLogin = enabled;
-  return enabled ? loginRegistered_ : process.exitCode() == 0;
+  process.start(systemctlExecutable(), arguments);
+  if (!process.waitForStarted(500) || !process.waitForFinished(1500)) {
+    process.kill();
+    (void)process.waitForFinished(500);
+    return false;
+  }
+  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) return false;
+  loginRegistered_ = enabled;
+  settings_.launchAtLogin = enabled;
+  return true;
 }
 
 bool AppController::loginIsRegistered() const {
   QProcess process;
-  process.start(QStringLiteral("systemctl"), {QStringLiteral("--user"), QStringLiteral("is-enabled"), QStringLiteral("project-ember.service")});
-  if (!process.waitForFinished(1000)) return false;
+  process.start(systemctlExecutable(), {QStringLiteral("--user"), QStringLiteral("is-enabled"), QStringLiteral("project-ember.service")});
+  if (!process.waitForStarted(500) || !process.waitForFinished(1000)) {
+    process.kill();
+    (void)process.waitForFinished(500);
+    return false;
+  }
   return process.exitCode() == 0 && QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed() == QStringLiteral("enabled");
 }
 
@@ -792,28 +1258,50 @@ QVariantMap AppController::status() const {
   result.insert(QStringLiteral("brightness"), settings_.brightness);
   result.insert(QStringLiteral("warmthDescription"), describeWarmth(settings_.warmth));
   result.insert(QStringLiteral("runtimeState"), runtimeStateName(runtimeState_));
-  result.insert(QStringLiteral("protocolOwnership"), runtimeStateName(runtimeState_));
+  const QString protocolOwnership = protocolOwned_ ? QStringLiteral("owned")
+      : runtimeState_ == RuntimeState::Enabling ? QStringLiteral("acquiring")
+      : runtimeState_ == RuntimeState::Blocked ? QStringLiteral("blocked")
+      : runtimeState_ == RuntimeState::Restoring ? QStringLiteral("releasing")
+      : QStringLiteral("none");
+  result.insert(QStringLiteral("protocolOwnership"), protocolOwnership);
   result.insert(QStringLiteral("effectiveFilterEnabled"),
-               settings_.filterEnabled && runtimeState_ == RuntimeState::CompositorControlled);
+               settings_.filterEnabled && protocolOwned_);
   result.insert(QStringLiteral("waylandAvailable"), waylandAvailable_);
   result.insert(QStringLiteral("managerVersion"), managerVersion_);
   result.insert(QStringLiteral("onlineOutputs"), outputCount_);
   result.insert(QStringLiteral("requestProcessed"),
                settings_.filterEnabled && processedGeneration_ != 0 && processedGeneration_ == generation_);
+  result.insert(QStringLiteral("requestedGeneration"), generation_);
   result.insert(QStringLiteral("requestProcessedGeneration"), processedGeneration_);
+  result.insert(QStringLiteral("lastAcceptedRequestId"), lastAcceptedRequestId_);
   result.insert(QStringLiteral("pixelsVerified"), pixelsVerified_);
   result.insert(QStringLiteral("opticalReadback"), QStringLiteral("unavailable: Hyprland CTM has no pixel/color readback"));
   result.insert(QStringLiteral("backlightLockPreference"), settings_.backlightLockEnabled);
   result.insert(QStringLiteral("backlightEngaged"), backlightEngaged_);
   result.insert(QStringLiteral("backlightAvailable"), backlightCapability_.available);
+  result.insert(QStringLiteral("backlightActualReadbackAvailable"), backlightCapability_.actualBrightnessAvailable);
   result.insert(QStringLiteral("backlightReason"), backlightCapability_.available ? QString() : backlightCapability_.reason);
+  result.insert(QStringLiteral("automaticBrightnessManaged"),
+                backlightEngaged_ && backlightCapability_.automaticBrightnessAvailable);
+  result.insert(QStringLiteral("automaticBrightnessAvailable"), backlightCapability_.automaticBrightnessAvailable);
+  result.insert(QStringLiteral("automaticBrightnessReason"), backlightCapability_.automaticBrightnessAvailable
+      ? QString() : backlightCapability_.automaticBrightnessReason);
   result.insert(QStringLiteral("sunScheduleEnabled"), settings_.sunScheduleEnabled);
+  result.insert(QStringLiteral("scheduleSessionOnly"), settings_.sunScheduleEnabled && !loginRegistered_);
   result.insert(QStringLiteral("locationConfigured"), settings_.location.has_value());
   result.insert(QStringLiteral("automationPaused"), settings_.automationPaused);
+  result.insert(QStringLiteral("scheduleTimerActive"), scheduleTimer_.isActive());
+  result.insert(QStringLiteral("scheduleHealthTimerActive"), scheduleHealthTimer_.isActive());
+  result.insert(QStringLiteral("sleepDelayInhibitorHeld"), sleepInhibitorFd_ >= 0);
+  result.insert(QStringLiteral("sleepMonitoringAvailable"), sleepMonitoringAvailable_);
   result.insert(QStringLiteral("launchAtLogin"), settings_.launchAtLogin);
   result.insert(QStringLiteral("loginRegistered"), loginRegistered_);
   result.insert(QStringLiteral("recoveryPending"), recoveryPending_);
+  result.insert(QStringLiteral("recoveryUnreadable"), recoveryUnreadable_);
   result.insert(QStringLiteral("recoveryWarning"), recoveryWarning_);
+  result.insert(QStringLiteral("settingsPersistenceBlocked"), settingsPersistenceBlocked_);
+  result.insert(QStringLiteral("settingsWarning"), settingsWarning_);
+  result.insert(QStringLiteral("settingsSaveError"), settingsSaveError_);
   result.insert(QStringLiteral("capabilityReason"), capabilityReason_);
   if (settings_.sunScheduleEnabled && settings_.location.has_value() && !settings_.automationPaused) {
     const SolarSchedule schedule = solarSchedule(QDateTime::currentDateTime(), *settings_.location, QTimeZone::systemTimeZone());
@@ -825,19 +1313,44 @@ QVariantMap AppController::status() const {
           ? QStringLiteral("sunrise") : QStringLiteral("sunset"));
     }
   } else if (settings_.sunScheduleEnabled) {
-    result.insert(QStringLiteral("solarState"), QStringLiteral("waiting_for_location"));
-    result.insert(QStringLiteral("solarOverrideActive"), false);
+    result.insert(QStringLiteral("solarState"), settings_.automationPaused
+        ? QStringLiteral("paused") : QStringLiteral("waiting_for_location"));
+    result.insert(QStringLiteral("solarOverrideActive"), settings_.overrideExpiresAtMs.has_value());
   }
-  const QString attention = !recoveryWarning_.isEmpty() ? recoveryWarning_ : (!lastError_.isEmpty() ? lastError_ : attentionMessage_);
+  const QString attention = !recoveryWarning_.isEmpty() ? recoveryWarning_
+      : (!settingsWarning_.isEmpty() ? settingsWarning_
+          : (!settingsSaveError_.isEmpty() ? settingsSaveError_
+              : (!lastError_.isEmpty() ? lastError_ : attentionMessage_)));
   result.insert(QStringLiteral("attentionMessage"), attention);
-  result.insert(QStringLiteral("attentionSeverity"), attention.isEmpty() ? QStringLiteral("none") : (attentionError_ || !lastError_.isEmpty() ? QStringLiteral("error") : QStringLiteral("info")));
-  const QString statusTitle = !settings_.filterEnabled ? QStringLiteral("Ember is off")
+  const bool attentionIsError = attentionError_ || !lastError_.isEmpty() || !settingsSaveError_.isEmpty()
+      || !recoveryWarning_.isEmpty() || !settingsWarning_.isEmpty();
+  result.insert(QStringLiteral("attentionSeverity"), attention.isEmpty() ? QStringLiteral("none")
+      : (attentionIsError ? QStringLiteral("error") : QStringLiteral("info")));
+  const QString statusTitle = runtimeState_ == RuntimeState::Restoring ? QStringLiteral("Ember is restoring")
+      : !settings_.filterEnabled && recoveryPending_ ? QStringLiteral("Hardware recovery needs attention")
+      : !settings_.filterEnabled && settings_.sunScheduleEnabled && settings_.automationPaused
+          ? QStringLiteral("Ember is off — Sun automation paused")
+      : !settings_.filterEnabled ? QStringLiteral("Ember is off")
       : runtimeState_ == RuntimeState::CompositorControlled ? QStringLiteral("Ember is on")
+      : runtimeState_ == RuntimeState::Reconciling && protocolOwned_ ? QStringLiteral("Ember is updating")
+      : runtimeState_ == RuntimeState::Enabling ? QStringLiteral("Ember is turning on")
       : QStringLiteral("Ember needs attention");
   result.insert(QStringLiteral("statusTitle"), statusTitle);
-  result.insert(QStringLiteral("statusDetail"), settings_.filterEnabled
-      ? (runtimeState_ == RuntimeState::CompositorControlled ? QStringLiteral("Compositor-controlled; displayed pixels are not read back") : runtimeStateName(runtimeState_))
-      : QStringLiteral("Your displays look normal; no CTM manager is owned"));
+  QString statusDetail;
+  if (runtimeState_ == RuntimeState::Restoring) {
+    statusDetail = QStringLiteral("Restoration is in progress; displayed pixels and hardware brightness are not verified");
+  } else if (recoveryPending_) {
+    statusDetail = QStringLiteral("Ember does not claim restoration while hardware recovery remains pending");
+  } else if (settings_.filterEnabled && runtimeState_ == RuntimeState::CompositorControlled) {
+    statusDetail = QStringLiteral("Compositor-controlled; displayed pixels are not read back");
+  } else if (settings_.filterEnabled) {
+    statusDetail = runtimeStateName(runtimeState_);
+  } else if (settings_.sunScheduleEnabled && settings_.automationPaused) {
+    statusDetail = QStringLiteral("Filter intent is off; Sun automation requires explicit Resume after the safety restore");
+  } else {
+    statusDetail = QStringLiteral("Filter intent is off; Ember does not own a CTM manager");
+  }
+  result.insert(QStringLiteral("statusDetail"), statusDetail);
   return result;
 }
 

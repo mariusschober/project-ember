@@ -3,13 +3,15 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, feat/linux-omarchy-native-20260920]
 
 jobs:
   build-test:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app || true; xcrun --show-sdk-path
       - name: Debug build
@@ -20,6 +22,21 @@ jobs:
         run: swift test --disable-sandbox
       - name: Core checks (fakes only)
         run: swift run --disable-sandbox EmberCoreChecks
+      - name: Verify Linux numerical fixtures against pinned Mac core
+        run: |
+          fixture_root="$RUNNER_TEMP/project-ember-fixture-reference"
+          mkdir -p "$fixture_root"
+          git show 41973930103c5c12c5c04715f4a1943ff759628d:Sources/EmberCore/Models.swift > "$fixture_root/Models.swift"
+          git show 41973930103c5c12c5c04715f4a1943ff759628d:Sources/EmberCore/ColorCurve.swift > "$fixture_root/ColorCurve.swift"
+          swiftc -parse-as-library \
+            "$fixture_root/Models.swift" \
+            "$fixture_root/ColorCurve.swift" \
+            linux/tests/fixtures/GenerateColorFixtures.swift \
+            -o "$fixture_root/generate-color-fixtures"
+          "$fixture_root/generate-color-fixtures" > "$fixture_root/generated.json"
+          python3 linux/tests/fixtures/verify_color_fixtures.py \
+            linux/tests/fixtures/color-curve-mac-4197393.json \
+            "$fixture_root/generated.json"
       - name: Validate plists and privacy manifest
         run: |
           /usr/bin/plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy

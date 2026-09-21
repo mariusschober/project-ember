@@ -18,6 +18,7 @@ struct Paths {
   QString safetyLatchFile;
   QString guardianFile;
   QString cleanExitFile;
+  QString controllerLockFile;
 
   static Paths fromEnvironment();
 };
@@ -57,6 +58,7 @@ public:
   bool save(const RecoveryRecord &record, QString *error = nullptr) const;
   bool clear(QString *error = nullptr) const;
   bool quarantine(QString *quarantinedPath = nullptr, QString *error = nullptr) const;
+  bool discardUnreadable(QString *error = nullptr) const;
   bool exists() const;
 
 private:
@@ -65,6 +67,7 @@ private:
 
 bool ensurePrivateDirectory(const QString &path, QString *error = nullptr);
 bool writeDurableFile(const QString &path, const QByteArray &data, mode_t mode, QString *error = nullptr);
+bool removeDurableFile(const QString &path, QString *error = nullptr);
 bool readRegularPrivateFile(const QString &path, QByteArray *data, QString *error = nullptr);
 
 QJsonObject settingsToJson(const Settings &settings);
@@ -73,5 +76,6 @@ QJsonObject recoveryToJson(const RecoveryRecord &record);
 bool recoveryFromJson(const QJsonObject &object, RecoveryRecord *record, int *schema, QString *error);
 
 QString hashBootId();
+QString hashSessionId();
 
 } // namespace ember

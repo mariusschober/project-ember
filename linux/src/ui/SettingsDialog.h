@@ -30,6 +30,10 @@ private:
   QLabel *statusLabel_ = nullptr;
   QLabel *statusDetailLabel_ = nullptr;
   QPushButton *toggleButton_ = nullptr;
+  QPushButton *neutralButton_ = nullptr;
+  QPushButton *eveningButton_ = nullptr;
+  QPushButton *pureRedButton_ = nullptr;
+  QPushButton *resumeAutomationButton_ = nullptr;
   QSlider *warmthSlider_ = nullptr;
   QSlider *brightnessSlider_ = nullptr;
   QLabel *warmthValue_ = nullptr;

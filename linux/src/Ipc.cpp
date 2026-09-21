@@ -6,6 +6,8 @@
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
 
+#include <cmath>
+
 namespace ember {
 
 namespace {
@@ -20,18 +22,103 @@ IpcAdaptor::IpcAdaptor(AppController *controller)
 }
 
 QVariantMap IpcAdaptor::GetStatus() const { return controller_->status(); }
-void IpcAdaptor::OpenSettings() { controller_->openSettings(); }
-void IpcAdaptor::SetFilterEnabled(bool enabled) { controller_->setFilterEnabled(enabled); }
-void IpcAdaptor::SetPreset(const QString &preset) { controller_->setPreset(preset); }
-void IpcAdaptor::SetWarmth(double warmth) { controller_->setWarmth(warmth); }
-void IpcAdaptor::SetBrightness(double brightness) { controller_->setBrightness(brightness); }
-void IpcAdaptor::SetBacklightLock(bool enabled) { controller_->setBacklightLock(enabled); }
-void IpcAdaptor::SetSchedule(bool enabled) { controller_->setSchedule(enabled); }
-void IpcAdaptor::SetLocation(double latitude, double longitude) { controller_->setLocation(latitude, longitude); }
-void IpcAdaptor::ClearLocation() { controller_->clearLocation(); }
-void IpcAdaptor::Retry() { controller_->retry(); }
-void IpcAdaptor::Restore() { controller_->restore(); }
-void IpcAdaptor::Quit() { controller_->quit(); }
+qulonglong IpcAdaptor::OpenSettings() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->openSettings();
+  return requestId;
+}
+qulonglong IpcAdaptor::SetFilterEnabled(bool enabled) {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setFilterEnabled(enabled);
+  return requestId;
+}
+qulonglong IpcAdaptor::SetPreset(const QString &preset) {
+  if (preset.size() > 32 || !presetFromName(preset).has_value()) {
+    sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("preset must be neutral, evening, or pure-red"));
+    return 0;
+  }
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setPreset(preset);
+  return requestId;
+}
+qulonglong IpcAdaptor::SetWarmth(double warmth) {
+  if (!std::isfinite(warmth) || warmth < 0.0 || warmth > 1.0) {
+    sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("warmth must be finite and between 0 and 1"));
+    return 0;
+  }
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setWarmth(warmth);
+  return requestId;
+}
+qulonglong IpcAdaptor::SetBrightness(double brightness) {
+  if (!std::isfinite(brightness) || brightness < 0.10 || brightness > 1.0) {
+    sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("brightness must be finite and between 0.10 and 1"));
+    return 0;
+  }
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setBrightness(brightness);
+  return requestId;
+}
+qulonglong IpcAdaptor::SetBacklightLock(bool enabled) {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setBacklightLock(enabled);
+  return requestId;
+}
+qulonglong IpcAdaptor::SetSchedule(bool enabled) {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setSchedule(enabled);
+  return requestId;
+}
+qulonglong IpcAdaptor::SetLocation(double latitude, double longitude) {
+  if (!std::isfinite(latitude) || !std::isfinite(longitude)
+      || latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+    sendErrorReply(QDBusError::InvalidArgs, QStringLiteral("location is outside the documented range"));
+    return 0;
+  }
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->setLocation(latitude, longitude);
+  return requestId;
+}
+qulonglong IpcAdaptor::ClearLocation() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->clearLocation();
+  return requestId;
+}
+qulonglong IpcAdaptor::ResumeAutomation() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->resumeAutomation();
+  return requestId;
+}
+qulonglong IpcAdaptor::AcceptCurrentHardwareState() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->acceptCurrentHardwareState();
+  return requestId;
+}
+qulonglong IpcAdaptor::DiscardUnreadableRecoveryEvidence() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->discardUnreadableRecoveryEvidence();
+  return requestId;
+}
+qulonglong IpcAdaptor::ReplaceUnreadableSettings() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->replaceUnreadableSettings();
+  return requestId;
+}
+qulonglong IpcAdaptor::Retry() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->retry();
+  return requestId;
+}
+qulonglong IpcAdaptor::Restore() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->restore();
+  return requestId;
+}
+qulonglong IpcAdaptor::Quit() {
+  const qulonglong requestId = controller_->beginIpcRequest();
+  controller_->quit();
+  return requestId;
+}
 
 bool registerIpc(AppController *controller, IpcAdaptor **adaptor, QString *error) {
   QDBusConnection bus = QDBusConnection::sessionBus();
@@ -76,6 +163,7 @@ bool ipcCall(const QString &method, const QVariantList &arguments, QVariant *rep
     if (error != nullptr) *error = interface.lastError().message();
     return false;
   }
+  interface.setTimeout(2000);
   QDBusMessage message = interface.callWithArgumentList(QDBus::AutoDetect, method, arguments);
   if (message.type() == QDBusMessage::ErrorMessage) {
     if (error != nullptr) *error = message.errorMessage();

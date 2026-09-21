@@ -10,8 +10,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSlider>
 #include <QVBoxLayout>
+
+#include <cmath>
 
 namespace ember {
 
@@ -20,9 +23,16 @@ SettingsDialog::SettingsDialog(AppController *controller)
   setWindowTitle(QStringLiteral("Project Ember"));
   setModal(false);
   setMinimumWidth(420);
+  resize(460, 680);
   setAttribute(Qt::WA_DeleteOnClose, false);
 
-  auto *root = new QVBoxLayout(this);
+  auto *outer = new QVBoxLayout(this);
+  auto *scroll = new QScrollArea(this);
+  scroll->setWidgetResizable(true);
+  auto *content = new QWidget(scroll);
+  auto *root = new QVBoxLayout(content);
+  scroll->setWidget(content);
+  outer->addWidget(scroll);
   statusLabel_ = new QLabel(this);
   statusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
   QFont statusFont = statusLabel_->font();
@@ -47,9 +57,13 @@ SettingsDialog::SettingsDialog(AppController *controller)
                            {QStringLiteral("Evening"), QStringLiteral("evening")},
                            {QStringLiteral("Pure Red"), QStringLiteral("pure-red")}}) {
     auto *button = new QPushButton(item.first, presets);
+    button->setCheckable(true);
     button->setAccessibleName(QStringLiteral("Set %1 preset").arg(item.first));
     connect(button, &QPushButton::clicked, this, [this, name = item.second] { controller_->setPreset(name); });
     presetLayout->addWidget(button);
+    if (item.second == QStringLiteral("neutral")) neutralButton_ = button;
+    else if (item.second == QStringLiteral("evening")) eveningButton_ = button;
+    else pureRedButton_ = button;
   }
   root->addWidget(presets);
 
@@ -79,8 +93,15 @@ SettingsDialog::SettingsDialog(AppController *controller)
 
   auto *scheduleGroup = new QGroupBox(QStringLiteral("Sun schedule"), this);
   auto *scheduleLayout = new QVBoxLayout(scheduleGroup);
+  auto *locationExplanation = new QLabel(
+      QStringLiteral("Approximate coordinates are used locally to calculate sunrise and sunset. No network lookup is performed. Enabling the schedule also registers Project Ember to launch with the graphical session; registration failures are shown as session-only."), scheduleGroup);
+  locationExplanation->setWordWrap(true);
+  scheduleLayout->addWidget(locationExplanation);
   scheduleCheck_ = new QCheckBox(QStringLiteral("Enable local sunrise/sunset scheduling"), scheduleGroup);
   scheduleLayout->addWidget(scheduleCheck_);
+  resumeAutomationButton_ = new QPushButton(QStringLiteral("Resume Sun automation"), scheduleGroup);
+  resumeAutomationButton_->setAccessibleName(QStringLiteral("Resume Sun automation after emergency restore"));
+  scheduleLayout->addWidget(resumeAutomationButton_);
   auto *locationForm = new QFormLayout;
   latitude_ = new QDoubleSpinBox(scheduleGroup);
   latitude_->setRange(-90.0, 90.0);
@@ -131,6 +152,7 @@ SettingsDialog::SettingsDialog(AppController *controller)
   connect(brightnessSlider_, &QSlider::valueChanged, this, &SettingsDialog::brightnessChanged);
   connect(backlightCheck_, &QCheckBox::toggled, controller_, &AppController::setBacklightLock);
   connect(scheduleCheck_, &QCheckBox::toggled, controller_, &AppController::setSchedule);
+  connect(resumeAutomationButton_, &QPushButton::clicked, controller_, &AppController::resumeAutomation);
   connect(loginCheck_, &QCheckBox::toggled, controller_, &AppController::setLaunchAtLogin);
   connect(primaryAction_, &QComboBox::currentIndexChanged, this, [this](int index) {
     controller_->setPrimaryAction(primaryAction_->itemData(index).toString());
@@ -150,11 +172,16 @@ void SettingsDialog::refreshFromController() {
   QString detail = status.value(QStringLiteral("statusDetail")).toString();
   if (status.value(QStringLiteral("solarState")).toString() == QStringLiteral("waiting_for_location")) {
     detail += QStringLiteral("\nSun schedule is waiting for a location.");
+  } else if (status.value(QStringLiteral("solarState")).toString() == QStringLiteral("paused")) {
+    detail += QStringLiteral("\nSun schedule is safety-paused until you explicitly resume it.");
   } else if (status.contains(QStringLiteral("solarNextEvent"))) {
     detail += QStringLiteral("\nNext %1: %2%3")
         .arg(status.value(QStringLiteral("solarNextEventKind")).toString(),
              status.value(QStringLiteral("solarNextEvent")).toString(),
              status.value(QStringLiteral("solarOverrideActive")).toBool() ? QStringLiteral(" (manual override active)") : QString());
+  }
+  if (status.value(QStringLiteral("scheduleSessionOnly")).toBool()) {
+    detail += QStringLiteral("\nSun schedule is session-only because launch at login is not registered.");
   }
   statusDetailLabel_->setText(detail
       + (status.value(QStringLiteral("attentionMessage")).toString().isEmpty()
@@ -164,6 +191,15 @@ void SettingsDialog::refreshFromController() {
   warmthSlider_->setValue(qRound(settings.warmth * 100.0));
   warmthSlider_->blockSignals(false);
   warmthValue_->setText(QStringLiteral("%1 — %2").arg(qRound(settings.warmth * 100.0)).arg(describeWarmth(settings.warmth)));
+  const auto setPresetChecked = [](QPushButton *button, bool checked) {
+    if (button == nullptr) return;
+    button->blockSignals(true);
+    button->setChecked(checked);
+    button->blockSignals(false);
+  };
+  setPresetChecked(neutralButton_, std::abs(settings.warmth - 0.0) < 0.000001);
+  setPresetChecked(eveningButton_, std::abs(settings.warmth - 0.62) < 0.000001);
+  setPresetChecked(pureRedButton_, std::abs(settings.warmth - 1.0) < 0.000001);
   brightnessSlider_->blockSignals(true);
   brightnessSlider_->setValue(qRound(settings.brightness * 100.0));
   brightnessSlider_->blockSignals(false);
@@ -178,6 +214,8 @@ void SettingsDialog::refreshFromController() {
   scheduleCheck_->blockSignals(true);
   scheduleCheck_->setChecked(settings.sunScheduleEnabled);
   scheduleCheck_->blockSignals(false);
+  resumeAutomationButton_->setVisible(settings.automationPaused);
+  resumeAutomationButton_->setEnabled(settings.automationPaused && settings.sunScheduleEnabled);
   loginCheck_->blockSignals(true);
   loginCheck_->setChecked(status.value(QStringLiteral("loginRegistered")).toBool());
   loginCheck_->blockSignals(false);

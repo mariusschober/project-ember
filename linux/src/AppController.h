@@ -8,10 +8,12 @@
 #include <QTimer>
 #include <QList>
 #include <QVariantMap>
+#include <memory>
 
 class QAction;
 class QMenu;
 class QSystemTrayIcon;
+class QLockFile;
 
 namespace ember {
 
@@ -30,6 +32,7 @@ public:
   bool start(QString *error = nullptr);
   QVariantMap status() const;
   QString diagnosticsText() const;
+  qulonglong beginIpcRequest();
   const Settings &settings() const { return settings_; }
   bool guiEnabled() const { return guiEnabled_; }
 
@@ -46,6 +49,10 @@ public slots:
   void setPrimaryAction(const QString &action);
   void setLocation(double latitude, double longitude);
   void clearLocation();
+  void resumeAutomation();
+  void acceptCurrentHardwareState();
+  void discardUnreadableRecoveryEvidence();
+  void replaceUnreadableSettings();
   void retry();
   void restore();
   void quit();
@@ -57,11 +64,13 @@ signals:
 private slots:
   void onCapabilityChanged(bool waylandAvailable, int managerVersion, int outputCount, QString reason);
   void onApplied(qulonglong generation);
-  void onBlocked(QString reason);
-  void onBackendFailed(QString reason);
+  void onBlocked(qulonglong generation, QString reason);
+  void onBackendFailed(qulonglong generation, QString reason);
   void onTopologyChanged();
-  void onReleased();
+  void onReleased(qulonglong generation);
   void onScheduleTimer();
+  void onScheduleHealthTimer();
+  void onBackendRetry();
   void onPrepareForSleep(bool sleeping);
   void flushSettings();
   void updateTray();
@@ -77,6 +86,9 @@ private:
   void scheduleFromLocation();
   void reconcileSchedule();
   void scheduleNextSolarBoundary();
+  void scheduleBackendRetry();
+  bool acquireSleepInhibitor(QString *error = nullptr);
+  void releaseSleepInhibitor();
   void setAttention(const QString &message, bool error = false);
   void scheduleApply();
   void clearAttention();
@@ -96,9 +108,12 @@ private:
   bool sleepWasDesired_ = false;
   bool waylandAvailable_ = false;
   bool pixelsVerified_ = false;
+  bool protocolOwned_ = false;
   bool backlightEngaged_ = false;
   bool recoveryPending_ = false;
+  bool recoveryUnreadable_ = false;
   bool loginRegistered_ = false;
+  bool sleepMonitoringAvailable_ = false;
   int managerVersion_ = 0;
   int outputCount_ = 0;
   qulonglong generation_ = 0;
@@ -115,7 +130,13 @@ private:
   bool attentionError_ = false;
   QString lastError_;
   QString recoveryWarning_;
+  QString settingsWarning_;
+  QString settingsSaveError_;
   bool settingsPersistenceBlocked_ = false;
+  qulonglong lastAcceptedRequestId_ = 0;
+  int backendRetryAttempts_ = 0;
+  int sleepInhibitorFd_ = -1;
+  std::unique_ptr<QLockFile> controllerLock_;
   QList<qint64> driftCorrections_;
 
   QThread waylandThread_;
@@ -124,6 +145,8 @@ private:
   QTimer persistTimer_;
   QTimer applyTimer_;
   QTimer scheduleTimer_;
+  QTimer scheduleHealthTimer_;
+  QTimer backendRetryTimer_;
   QTimer driftTimer_;
   QSystemTrayIcon *tray_ = nullptr;
   QMenu *trayMenu_ = nullptr;

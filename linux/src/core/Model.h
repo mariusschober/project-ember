@@ -86,6 +86,7 @@ struct HardwareRecord {
   QString deviceId;
   QString devicePath;
   QString bootIdHash;
+  QString sessionIdHash;
   int originalBrightness = -1;
   int lastWrittenBrightness = -1;
   int maximumBrightness = 0;
@@ -93,13 +94,26 @@ struct HardwareRecord {
   QString error;
 };
 
+struct AutomaticBrightnessRecord {
+  QString deviceId;
+  QString devicePath;
+  QString provider;
+  QString bootIdHash;
+  QString sessionIdHash;
+  int originalValue = -1;
+  int lastWrittenValue = -1;
+  bool unresolved = false;
+  QString error;
+};
+
 struct RecoveryRecord {
-  static constexpr int schemaVersion = 1;
+  static constexpr int schemaVersion = 2;
 
   int schema = schemaVersion;
   QString appVersion = QStringLiteral("0.1.0-linux-alpha.1");
   std::int64_t createdAtMs = 0;
   std::optional<HardwareRecord> hardware;
+  std::optional<AutomaticBrightnessRecord> automaticBrightness;
   bool safetyPaused = false;
 };
 

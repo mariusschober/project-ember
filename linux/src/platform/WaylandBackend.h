@@ -3,10 +3,14 @@
 #include "core/Model.h"
 
 #include <QObject>
-#include <QTimer>
+#include <QMap>
+#include <QVariantMap>
 
 #include <cstdint>
+#include <atomic>
 #include <map>
+
+class QSocketNotifier;
 
 struct wl_display;
 struct wl_output;
@@ -22,20 +26,26 @@ class WaylandBackend final : public QObject {
 public:
   explicit WaylandBackend(QObject *parent = nullptr);
   ~WaylandBackend() override;
+  QVariantMap readOnlyProbeSnapshot() const;
+
+  // Called from the coordinator thread before a queued apply/release. This is
+  // intentionally lock-free so an Off/Restore/Quit intent can invalidate work
+  // while the dedicated Wayland thread is inside a bounded protocol barrier.
+  void invalidateBefore(qulonglong generation);
 
 public slots:
   void probe();
   void apply(ColorMatrix matrix, qulonglong generation);
-  void release();
+  void release(qulonglong generation);
   void stop();
 
 signals:
   void capabilityChanged(bool waylandAvailable, int managerVersion, int outputCount, QString reason);
   void applied(qulonglong generation);
-  void blocked(QString reason);
-  void failed(QString reason);
+  void blocked(qulonglong generation, QString reason);
+  void failed(qulonglong generation, QString reason);
   void topologyChanged();
-  void released();
+  void released(qulonglong generation);
 
 private slots:
   void pumpSocket();
@@ -50,6 +60,9 @@ private:
     QString description;
     QString make;
     QString model;
+    std::int32_t physicalWidth = 0;
+    std::int32_t physicalHeight = 0;
+    std::int32_t transform = 0;
     bool done = false;
   };
 
@@ -58,15 +71,15 @@ private:
     bool done = false;
   };
 
-  bool connectDisplay();
+  bool connectDisplay(qulonglong generation = 0);
   bool waitForRegistry();
   bool waitForSync(int timeoutMs);
   bool pumpOnce(int timeoutMs);
-  bool bindManager();
+  bool bindManager(qulonglong generation);
   bool submit(ColorMatrix matrix, qulonglong generation);
   void destroyManager();
   void destroyDisplay();
-  void reportFailure(const QString &reason);
+  void reportFailure(const QString &reason, qulonglong generation = 0);
 
 public:
   static void registryGlobal(void *data, wl_registry *registry, std::uint32_t name,
@@ -89,14 +102,16 @@ private:
   wl_display *display_ = nullptr;
   wl_registry *registry_ = nullptr;
   hyprland_ctm_control_manager_v1 *manager_ = nullptr;
-  QTimer *pumpTimer_ = nullptr;
+  QSocketNotifier *socketNotifier_ = nullptr;
   std::map<std::uint32_t, OutputState> outputs_;
+  QMap<QString, int> advertisedGlobals_;
   std::uint32_t managerGlobalName_ = 0;
   int managerVersion_ = 0;
   bool registryReady_ = false;
   bool managerBlocked_ = false;
   bool stopping_ = false;
   std::uint64_t connectionEpoch_ = 0;
+  std::atomic<qulonglong> minimumGeneration_{0};
 };
 
 } // namespace ember

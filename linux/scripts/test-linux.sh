@@ -15,4 +15,8 @@ export XDG_STATE_HOME="${test_root}/state"
 export XDG_RUNTIME_DIR="${test_root}/runtime"
 mkdir -p "${XDG_RUNTIME_DIR}"
 chmod 700 "${XDG_RUNTIME_DIR}"
-ctest --test-dir "${build_dir}" --output-on-failure
+if command -v dbus-run-session >/dev/null 2>&1; then
+  dbus-run-session -- ctest --test-dir "${build_dir}" --output-on-failure
+else
+  ctest --test-dir "${build_dir}" --output-on-failure
+fi

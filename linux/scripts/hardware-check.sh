@@ -7,9 +7,18 @@ if [[ "${EMBER_HARDWARE_ACCEPT:-}" != "1" ]]; then
   exit 2
 fi
 
+if [[ "${EUID}" -eq 0 ]]; then
+  echo "Refusing to probe a graphical display session as root." >&2
+  exit 2
+fi
+
 if [[ -z "${WAYLAND_DISPLAY:-}" || -z "${XDG_RUNTIME_DIR:-}" ]]; then
   echo "A live Wayland session with XDG_RUNTIME_DIR is required." >&2
   exit 2
+fi
+
+if [[ -z "${XDG_SESSION_ID:-}" ]]; then
+  echo "Warning: XDG_SESSION_ID is absent; Backlight Lock must remain unavailable." >&2
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

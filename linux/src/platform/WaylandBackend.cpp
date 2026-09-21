@@ -3,6 +3,7 @@
 #include "hyprland-ctm-control-v1-client-protocol.h"
 
 #include <QElapsedTimer>
+#include <QSocketNotifier>
 
 #include <poll.h>
 #include <wayland-client-core.h>
@@ -43,6 +44,43 @@ WaylandBackend::WaylandBackend(QObject *parent) : QObject(parent) {}
 
 WaylandBackend::~WaylandBackend() { stop(); }
 
+void WaylandBackend::invalidateBefore(qulonglong generation) {
+  qulonglong previous = minimumGeneration_.load(std::memory_order_relaxed);
+  while (previous < generation
+         && !minimumGeneration_.compare_exchange_weak(previous, generation,
+                                                       std::memory_order_release,
+                                                       std::memory_order_relaxed)) {
+  }
+}
+
+QVariantMap WaylandBackend::readOnlyProbeSnapshot() const {
+  QVariantList outputs;
+  for (const auto &[globalName, output] : outputs_) {
+    Q_UNUSED(globalName);
+    QVariantMap item;
+    item.insert(QStringLiteral("name"), output.name);
+    item.insert(QStringLiteral("make"), output.make);
+    item.insert(QStringLiteral("model"), output.model);
+    item.insert(QStringLiteral("physicalWidthMm"), output.physicalWidth);
+    item.insert(QStringLiteral("physicalHeightMm"), output.physicalHeight);
+    item.insert(QStringLiteral("transform"), output.transform);
+    outputs.append(item);
+  }
+  QVariantMap result;
+  result.insert(QStringLiteral("probeEvidence"), QStringLiteral("registry-only; no CTM manager bind or color request"));
+  result.insert(QStringLiteral("waylandConnected"), display_ != nullptr);
+  result.insert(QStringLiteral("managerVersion"), managerVersion_);
+  result.insert(QStringLiteral("managerSupported"), managerVersion_ >= 2);
+  result.insert(QStringLiteral("connectionEpoch"), static_cast<qulonglong>(connectionEpoch_));
+  result.insert(QStringLiteral("outputs"), outputs);
+  QVariantMap globals;
+  for (auto iterator = advertisedGlobals_.cbegin(); iterator != advertisedGlobals_.cend(); ++iterator) {
+    globals.insert(iterator.key(), iterator.value());
+  }
+  result.insert(QStringLiteral("advertisedGlobals"), globals);
+  return result;
+}
+
 void WaylandBackend::probe() {
   if (display_ == nullptr && !connectDisplay()) return;
   emit capabilityChanged(true, managerVersion_, static_cast<int>(outputs_.size()),
@@ -50,37 +88,41 @@ void WaylandBackend::probe() {
 }
 
 void WaylandBackend::apply(ColorMatrix matrix, qulonglong generation) {
+  if (generation < minimumGeneration_.load(std::memory_order_acquire)) return;
   if (!finiteNonNegativeMatrix(matrix)) {
-    reportFailure(QStringLiteral("refusing non-finite or negative color matrix"));
+    reportFailure(QStringLiteral("refusing non-finite or negative color matrix"), generation);
     return;
   }
-  if (display_ == nullptr && !connectDisplay()) return;
+  if (display_ == nullptr && !connectDisplay(generation)) return;
   if (managerVersion_ < 2) {
-    emit failed(QStringLiteral("Hyprland CTM manager v2 is unavailable; no display was changed"));
+    emit failed(generation, QStringLiteral("Hyprland CTM manager v2 is unavailable; no display was changed"));
     return;
   }
   if (outputs_.empty()) {
-    emit failed(QStringLiteral("No live Wayland outputs are available"));
+    emit failed(generation, QStringLiteral("No live Wayland outputs are available"));
     return;
   }
-  if (!bindManager()) return;
+  if (generation < minimumGeneration_.load(std::memory_order_acquire)) return;
+  if (!bindManager(generation)) return;
+  if (generation < minimumGeneration_.load(std::memory_order_acquire)) return;
   if (managerBlocked_) {
     destroyManager();
-    emit blocked(QStringLiteral("Another CTM controller owns the compositor"));
+    emit blocked(generation, QStringLiteral("Another CTM controller owns the compositor"));
     return;
   }
   (void)submit(matrix, generation);
 }
 
-void WaylandBackend::release() {
+void WaylandBackend::release(qulonglong generation) {
+  invalidateBefore(generation);
   destroyManager();
-  emit released();
+  emit released(generation);
 }
 
 void WaylandBackend::stop() {
   if (stopping_) return;
   stopping_ = true;
-  if (pumpTimer_ != nullptr) pumpTimer_->stop();
+  if (socketNotifier_ != nullptr) socketNotifier_->setEnabled(false);
   destroyManager();
   destroyDisplay();
   stopping_ = false;
@@ -93,7 +135,7 @@ void WaylandBackend::pumpSocket() {
   }
 }
 
-bool WaylandBackend::connectDisplay() {
+bool WaylandBackend::connectDisplay(qulonglong generation) {
   if (display_ != nullptr) return true;
   display_ = wl_display_connect(nullptr);
   if (display_ == nullptr) {
@@ -104,19 +146,16 @@ bool WaylandBackend::connectDisplay() {
   stopping_ = false;
   registry_ = wl_display_get_registry(display_);
   if (registry_ == nullptr || wl_registry_add_listener(registry_, &registryListener, this) != 0) {
-    reportFailure(QStringLiteral("Could not initialize the Wayland registry"));
+    reportFailure(QStringLiteral("Could not initialize the Wayland registry"), generation);
     return false;
   }
   if (!waitForRegistry()) {
-    reportFailure(QStringLiteral("Wayland registry did not become ready within 500 ms"));
+    reportFailure(QStringLiteral("Wayland registry did not become ready within 500 ms"), generation);
     return false;
   }
-  if (pumpTimer_ == nullptr) {
-    pumpTimer_ = new QTimer(this);
-    pumpTimer_->setInterval(25);
-    connect(pumpTimer_, &QTimer::timeout, this, &WaylandBackend::pumpSocket);
-  }
-  pumpTimer_->start();
+  if (socketNotifier_ != nullptr) delete socketNotifier_;
+  socketNotifier_ = new QSocketNotifier(wl_display_get_fd(display_), QSocketNotifier::Read, this);
+  connect(socketNotifier_, &QSocketNotifier::activated, this, [this] { pumpSocket(); });
   emit capabilityChanged(true, managerVersion_, static_cast<int>(outputs_.size()),
                          managerVersion_ >= 2 ? QString() : QStringLiteral("Hyprland CTM protocol v2 is not advertised"));
   return true;
@@ -156,8 +195,13 @@ bool WaylandBackend::pumpOnce(int timeoutMs) {
   if (wl_display_prepare_read(display_) != 0) {
     return wl_display_dispatch_pending(display_) >= 0;
   }
-  (void)wl_display_flush(display_);
-  struct pollfd descriptor {wl_display_get_fd(display_), POLLIN, 0};
+  const int flushed = wl_display_flush(display_);
+  if (flushed < 0 && errno != EAGAIN) {
+    wl_display_cancel_read(display_);
+    return false;
+  }
+  const short events = static_cast<short>(POLLIN | (flushed < 0 ? POLLOUT : 0));
+  struct pollfd descriptor {wl_display_get_fd(display_), events, 0};
   const int polled = ::poll(&descriptor, 1, std::max(timeoutMs, 0));
   if (polled < 0) {
     if (errno == EINTR) {
@@ -167,15 +211,21 @@ bool WaylandBackend::pumpOnce(int timeoutMs) {
     wl_display_cancel_read(display_);
     return false;
   }
-  if (polled > 0 && (descriptor.revents & (POLLIN | POLLERR | POLLHUP))) {
+  if (polled > 0 && (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+    wl_display_cancel_read(display_);
+    return false;
+  }
+  if (polled > 0 && (descriptor.revents & POLLIN)) {
     if (wl_display_read_events(display_) < 0) return false;
   } else {
     wl_display_cancel_read(display_);
   }
+  if (polled > 0 && (descriptor.revents & POLLOUT)
+      && wl_display_flush(display_) < 0 && errno != EAGAIN) return false;
   return wl_display_dispatch_pending(display_) >= 0 && wl_display_get_error(display_) == 0;
 }
 
-bool WaylandBackend::bindManager() {
+bool WaylandBackend::bindManager(qulonglong generation) {
   if (manager_ != nullptr) return true;
   if (registry_ == nullptr || managerGlobalName_ == 0 || managerVersion_ < 2) return false;
   managerBlocked_ = false;
@@ -183,7 +233,7 @@ bool WaylandBackend::bindManager() {
       wl_registry_bind(registry_, managerGlobalName_, &hyprland_ctm_control_manager_v1_interface, 2));
   if (manager_ == nullptr || hyprland_ctm_control_manager_v1_add_listener(manager_, &managerListener, this) != 0) {
     destroyManager();
-    emit failed(QStringLiteral("Could not bind the Hyprland CTM manager"));
+    emit failed(generation, QStringLiteral("Could not bind the Hyprland CTM manager"));
     return false;
   }
   // The barrier is deliberately bounded and runs on this dedicated Wayland
@@ -191,12 +241,12 @@ bool WaylandBackend::bindManager() {
   // the v2 blocked event has had a chance to arrive.
   if (!waitForSync(250)) {
     destroyManager();
-    emit failed(QStringLiteral("CTM ownership barrier timed out; no display was changed"));
+    emit failed(generation, QStringLiteral("CTM ownership barrier timed out; no display was changed"));
     return false;
   }
   if (managerBlocked_) {
     destroyManager();
-    emit blocked(QStringLiteral("Another CTM controller owns the compositor"));
+    emit blocked(generation, QStringLiteral("Another CTM controller owns the compositor"));
     return false;
   }
   return true;
@@ -216,11 +266,11 @@ bool WaylandBackend::submit(ColorMatrix matrix, qulonglong generation) {
   }
   hyprland_ctm_control_manager_v1_commit(manager_);
   if (wl_display_flush(display_) < 0 && errno != EAGAIN) {
-    reportFailure(QStringLiteral("Wayland CTM commit could not be flushed"));
+    reportFailure(QStringLiteral("Wayland CTM commit could not be flushed"), generation);
     return false;
   }
   if (!waitForSync(500)) {
-    reportFailure(QStringLiteral("Wayland CTM request was not processed within 500 ms"));
+    reportFailure(QStringLiteral("Wayland CTM request was not processed within 500 ms"), generation);
     return false;
   }
   emit applied(generation);
@@ -237,6 +287,11 @@ void WaylandBackend::destroyManager() {
 }
 
 void WaylandBackend::destroyDisplay() {
+  if (socketNotifier_ != nullptr) {
+    socketNotifier_->setEnabled(false);
+    delete socketNotifier_;
+    socketNotifier_ = nullptr;
+  }
   for (auto &[globalName, output] : outputs_) {
     Q_UNUSED(globalName);
     if (output.object == nullptr) continue;
@@ -244,6 +299,7 @@ void WaylandBackend::destroyDisplay() {
     else wl_output_destroy(output.object);
   }
   outputs_.clear();
+  advertisedGlobals_.clear();
   if (registry_ != nullptr) {
     wl_registry_destroy(registry_);
     registry_ = nullptr;
@@ -257,8 +313,8 @@ void WaylandBackend::destroyDisplay() {
   registryReady_ = false;
 }
 
-void WaylandBackend::reportFailure(const QString &reason) {
-  emit failed(reason);
+void WaylandBackend::reportFailure(const QString &reason, qulonglong generation) {
+  emit failed(generation, reason);
   destroyManager();
   destroyDisplay();
 }
@@ -266,6 +322,9 @@ void WaylandBackend::reportFailure(const QString &reason) {
 void WaylandBackend::registryGlobal(void *data, wl_registry *registry, std::uint32_t name,
                                     const char *interface, std::uint32_t version) {
   auto *self = static_cast<WaylandBackend *>(data);
+  const QString interfaceName = QString::fromUtf8(interface == nullptr ? "" : interface);
+  self->advertisedGlobals_.insert(interfaceName,
+      std::max(self->advertisedGlobals_.value(interfaceName, 0), static_cast<int>(version)));
   if (std::strcmp(interface, "hyprland_ctm_control_manager_v1") == 0) {
     self->managerGlobalName_ = name;
     self->managerVersion_ = static_cast<int>(version);
@@ -316,6 +375,9 @@ void WaylandBackend::outputGeometry(void *data, wl_output *output, std::int32_t 
   auto *state = static_cast<OutputState *>(data);
   state->make = QString::fromUtf8(make == nullptr ? "" : make);
   state->model = QString::fromUtf8(model == nullptr ? "" : model);
+  state->physicalWidth = physicalWidth;
+  state->physicalHeight = physicalHeight;
+  state->transform = transform;
 }
 
 void WaylandBackend::outputMode(void *data, wl_output *output, std::uint32_t flags,

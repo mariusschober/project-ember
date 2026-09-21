@@ -8,6 +8,7 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install native dependencies
@@ -17,7 +18,7 @@ jobs:
             cmake ninja-build pkg-config g++ \
             dbus \
             qt6-base-dev qt6-wayland-dev libwayland-dev \
-            wayland-protocols libxkbcommon-dev
+            wayland-protocols libxkbcommon-dev desktop-file-utils
       - name: Configure Debug
         run: cmake -S linux -B build/linux-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
       - name: Build Debug
@@ -30,5 +31,32 @@ jobs:
         run: cmake --build build/linux-release --parallel
       - name: Test Release
         run: dbus-run-session -- ctest --test-dir build/linux-release --output-on-failure
+      - name: Validate and stage install
+        run: |
+          desktop-file-validate linux/packaging/app.projectember.Ember.desktop
+          DESTDIR="$RUNNER_TEMP/project-ember-stage" cmake --install build/linux-release
+          find "$RUNNER_TEMP/project-ember-stage" -type f -print0 | sort -z | xargs -0 sha256sum
       - name: Check whitespace
         run: git diff --check
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake ninja-build pkg-config g++ dbus \
+            qt6-base-dev qt6-wayland-dev libwayland-dev \
+            wayland-protocols libxkbcommon-dev
+      - name: Configure sanitizers
+        run: cmake -S linux -B build/linux-sanitized -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DEMBER_ENABLE_SANITIZERS=ON
+      - name: Build sanitizers
+        run: cmake --build build/linux-sanitized --parallel
+      - name: Test sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: dbus-run-session -- ctest --test-dir build/linux-sanitized --output-on-failure

@@ -75,7 +75,18 @@ SolarSchedule solarSchedule(const QDateTime &date, const Coordinate &coordinate,
     const QDate candidateDate = startDate.addDays(offset);
     const QDateTime candidateAtNoon(candidateDate, QTime(12, 0), timeZone);
     const SolarDay candidateDay = solarDay(candidateAtNoon, coordinate, timeZone);
-    if (candidateDay.condition != SolarDayCondition::Normal) continue;
+    if (candidateDay.condition != SolarDayCondition::Normal) {
+      const bool candidateNight = candidateDay.condition == SolarDayCondition::SunAlwaysBelow;
+      // At the exact poles the standard hour-angle equation never produces a
+      // normal sunrise/sunset day. Use the first local noon whose polar state
+      // changes as a bounded scheduling boundary rather than preserving a
+      // manual override forever.
+      if (candidateNight != isNight && candidateAtNoon > now.addMSecs(500)) {
+        next = SolarEvent{desiredKind, candidateAtNoon};
+        break;
+      }
+      continue;
+    }
     const QDateTime candidate = desiredKind == SolarEventKind::Sunrise ? candidateDay.sunrise : candidateDay.sunset;
     if (candidate > now.addMSecs(500)) {
       next = SolarEvent{desiredKind, candidate};
