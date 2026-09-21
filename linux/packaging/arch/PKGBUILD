@@ -1,22 +1,18 @@
 pkgname=project-ember
-pkgver=0.1.0
+pkgver=0.1.0.alpha1
 pkgrel=1
 pkgdesc='Native Qt/Wayland tray and settings utility for Ember'
 arch=('x86_64')
 url='https://github.com/mariusschober/project-ember'
 depends=('qt6-base' 'qt6-wayland' 'wayland' 'systemd')
-makedepends=('cmake' 'ninja' 'pkgconf' 'wayland-protocols')
-source=()
-sha256sums=()
+makedepends=('git' 'cmake' 'ninja' 'pkgconf')
+options=('!debug')
+_commit=74b03bfe058819ed929346f9b9e0895719ecf4d5
+source=("project-ember::git+${url}.git#commit=${_commit}")
+sha256sums=('SKIP')
 
 # Project Ember currently has no explicit upstream license. Do not label the
 # package with an open-source license until the owner makes that decision.
-
-prepare() {
-  local repository="${startdir}/../../.."
-  mkdir -p "${srcdir}/project-ember"
-  cp -a "${repository}/." "${srcdir}/project-ember/"
-}
 
 build() {
   cmake -S "${srcdir}/project-ember/linux" -B build -G Ninja \

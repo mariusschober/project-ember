@@ -60,3 +60,82 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: dbus-run-session -- ctest --test-dir build/linux-sanitized --output-on-failure
+
+  arch-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container: archlinux:base-devel
+    steps:
+      - name: Install clean Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git cmake ninja pkgconf qt6-base qt6-wayland wayland \
+            desktop-file-utils systemd
+          useradd --create-home builder
+      - uses: actions/checkout@v4
+      - name: Prepare unprivileged build directory
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE/linux/packaging/arch"
+      - name: Build package as an unprivileged user
+        run: |
+          runuser -u builder -- env HOME=/home/builder \
+            bash -c 'cd "$1" && makepkg --cleanbuild --noconfirm' \
+            bash "$GITHUB_WORKSPACE/linux/packaging/arch"
+      - name: Verify source and package contents
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/linux/packaging/arch"
+          shopt -s nullglob
+          packages=("$package_dir"/project-ember-*.pkg.tar.zst)
+          test "${#packages[@]}" -eq 1
+          package_file="${packages[0]}"
+
+          test "$(git -C "$package_dir/src/project-ember" rev-parse HEAD)" = \
+            "74b03bfe058819ed929346f9b9e0895719ecf4d5"
+          runuser -u builder -- env HOME=/home/builder \
+            bash -c 'cd "$1" && makepkg --printsrcinfo' \
+            bash "$package_dir" | \
+            grep -F 'commit=74b03bfe058819ed929346f9b9e0895719ecf4d5'
+
+          package_root="$RUNNER_TEMP/project-ember-package-root"
+          mkdir -p "$package_root"
+          bsdtar -xf "$package_file" -C "$package_root"
+          pacman -Qlp "$package_file" | tee "$package_dir/package-contents.txt"
+          test -x "$package_root/usr/bin/project-ember"
+          test -f "$package_root/usr/share/project-ember/NOTICE"
+          test -f "$package_root/usr/share/applications/app.projectember.Ember.desktop"
+          test -f "$package_root/usr/share/icons/hicolor/scalable/apps/project-ember.svg"
+          test -f "$package_root/usr/lib/systemd/user/project-ember.service"
+          desktop-file-validate \
+            "$package_root/usr/share/applications/app.projectember.Ember.desktop"
+          ! bsdtar -tf "$package_file" | grep -qx '.INSTALL'
+          ! pacman -Qlp "$package_file" | \
+            grep -Eq '/(default|graphical-session)\.target\.wants/project-ember\.service$'
+
+          pacman -U --noconfirm "$package_file"
+          systemd-analyze verify /usr/lib/systemd/user/project-ember.service
+          ldd /usr/bin/project-ember | tee "$package_dir/dynamic-dependencies.txt"
+          ! grep -F 'not found' "$package_dir/dynamic-dependencies.txt"
+          find /usr/lib/qt6/plugins/platforms -maxdepth 1 -type f \
+            -name 'libqwayland*.so' -print -quit | grep -q .
+
+          package_name="$(basename "$package_file")"
+          package_sha="$(sha256sum "$package_file" | cut -d' ' -f1)"
+          {
+            echo "source_commit=74b03bfe058819ed929346f9b9e0895719ecf4d5"
+            echo "package=$package_name"
+            echo "sha256=$package_sha"
+          } | tee "$package_dir/package-provenance.txt"
+          echo "path=$package_file" >> "$GITHUB_OUTPUT"
+      - name: Retain review candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-ember-0.1.0.alpha1-x86_64
+          path: |
+            ${{ steps.package.outputs.path }}
+            linux/packaging/arch/package-provenance.txt
+            linux/packaging/arch/package-contents.txt
+            linux/packaging/arch/dynamic-dependencies.txt
+          retention-days: 7

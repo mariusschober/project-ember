@@ -20,8 +20,9 @@ inserted only after those exact commands execute.
 - CTM protocol: `hyprwm/hyprland-protocols` blob
   `6cb791c1710cdedfc59b3d48fd91cca997d1eabd`, with terms in
   `linux/protocols/NOTICE`.
-- Linux source/package checkpoint and final commit: pending immutable
-  checkpoint creation.
+- Immutable Linux package source checkpoint:
+  `74b03bfe058819ed929346f9b9e0895719ecf4d5`; final branch commit and built
+  package hash remain pending verification.
 - Existing Mac application source changes: none.
 
 ## Implemented scope and evidence layer

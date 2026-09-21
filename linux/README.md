@@ -62,6 +62,22 @@ systemctl --user start project-ember.service
 project-ember settings
 ```
 
+For the Arch/Omarchy package, `PKGBUILD` fetches the exact immutable source
+commit recorded in `_commit`. Build it as an ordinary user, then inspect and
+install the resulting local package explicitly:
+
+```bash
+cd linux/packaging/arch
+makepkg --cleanbuild --syncdeps
+pacman -Qip ./project-ember-0.1.0.alpha1-1-x86_64.pkg.tar.zst
+sudo pacman -U ./project-ember-0.1.0.alpha1-1-x86_64.pkg.tar.zst
+```
+
+Package installation places the binary, desktop file, icon, protocol notice,
+and user unit, but does not enable or start the service and does not change any
+display setting. The retained CI package is a short-lived review artifact, not
+a release or an AUR publication.
+
 The desktop launcher runs `project-ember settings`. If no controller exists,
 that command starts `project-ember.service`, waits for its local D-Bus owner,
 and opens the settings window. It does not launch an unsupervised second
