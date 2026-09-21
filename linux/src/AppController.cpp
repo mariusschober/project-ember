@@ -353,7 +353,9 @@ void AppController::setFilterEnabled(bool enabled) {
 
 void AppController::setFilterEnabledInternal(bool enabled, bool scheduleAction) {
   if (settings_.filterEnabled == enabled &&
-      ((enabled && (runtimeState_ == RuntimeState::CompositorControlled || runtimeState_ == RuntimeState::Enabling)) ||
+      ((enabled && (runtimeState_ == RuntimeState::CompositorControlled
+                    || runtimeState_ == RuntimeState::Enabling
+                    || (runtimeState_ == RuntimeState::Reconciling && protocolOwned_))) ||
        (!enabled && runtimeState_ == RuntimeState::Off))) {
     persistSoon();
     publish();

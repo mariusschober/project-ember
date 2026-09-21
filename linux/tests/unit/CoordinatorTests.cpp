@@ -113,8 +113,11 @@ void CoordinatorTests::deterministicRandomizedSequencesPreserveInvariants() {
     const bool processed = status.value(QStringLiteral("requestProcessed")).toBool();
     if (effective) {
       QVERIFY(desired);
-      QVERIFY(processed);
-      QCOMPARE(status.value(QStringLiteral("runtimeState")).toString(), QStringLiteral("compositor_controlled"));
+      QCOMPARE(status.value(QStringLiteral("protocolOwnership")).toString(), QStringLiteral("owned"));
+      const QString runtimeState = status.value(QStringLiteral("runtimeState")).toString();
+      QVERIFY(runtimeState == QStringLiteral("compositor_controlled")
+              || runtimeState == QStringLiteral("reconciling"));
+      QCOMPARE(processed, runtimeState == QStringLiteral("compositor_controlled"));
     }
     if (!desired) {
       QVERIFY(!effective);
