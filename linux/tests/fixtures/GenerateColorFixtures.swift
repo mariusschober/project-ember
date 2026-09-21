@@ -1,13 +1,13 @@
 import Foundation
 
-private struct FixtureRow: Codable {
+private struct FixtureRow: Encodable {
   let warmth: Double
   let brightness: Double
   let gains: [Float]
   let matrixDiagonal: [Double]
 }
 
-private struct Fixture: Codable {
+private struct Fixture: Encodable {
   let schemaVersion = 1
   let referenceCommit = "41973930103c5c12c5c04715f4a1943ff759628d"
   let referenceFiles = [
