@@ -7,7 +7,7 @@ url='https://github.com/mariusschober/project-ember'
 depends=('qt6-base' 'qt6-wayland' 'wayland' 'systemd')
 makedepends=('git' 'cmake' 'ninja' 'pkgconf')
 options=('!debug')
-_commit=68f0d5cee31a24905a5fe2c6878ae4ec87168eb8
+_commit=41579cc8b866626070c9048991907f3fb7cfb56f
 source=("project-ember::git+${url}.git#commit=${_commit}")
 sha256sums=('SKIP')
 

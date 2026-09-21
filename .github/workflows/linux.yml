@@ -92,12 +92,12 @@ jobs:
           test "${#packages[@]}" -eq 1
           package_file="${packages[0]}"
 
-          test "$(git -C "$package_dir/src/project-ember" rev-parse HEAD)" = \
-            "68f0d5cee31a24905a5fe2c6878ae4ec87168eb8"
+          test "$(runuser -u builder -- git -C "$package_dir/src/project-ember" rev-parse HEAD)" = \
+            "41579cc8b866626070c9048991907f3fb7cfb56f"
           runuser -u builder -- env HOME=/home/builder \
             bash -c 'cd "$1" && makepkg --printsrcinfo' \
             bash "$package_dir" | \
-            grep -F 'commit=68f0d5cee31a24905a5fe2c6878ae4ec87168eb8'
+            grep -F 'commit=41579cc8b866626070c9048991907f3fb7cfb56f'
 
           package_root="$RUNNER_TEMP/project-ember-package-root"
           mkdir -p "$package_root"
@@ -124,7 +124,7 @@ jobs:
           package_name="$(basename "$package_file")"
           package_sha="$(sha256sum "$package_file" | cut -d' ' -f1)"
           {
-            echo "source_commit=68f0d5cee31a24905a5fe2c6878ae4ec87168eb8"
+            echo "source_commit=41579cc8b866626070c9048991907f3fb7cfb56f"
             echo "package=$package_name"
             echo "sha256=$package_sha"
           } | tee "$package_dir/package-provenance.txt"
