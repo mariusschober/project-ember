@@ -18,7 +18,7 @@ constexpr auto interfaceName = "app.projectember.Ember";
 }
 
 IpcAdaptor::IpcAdaptor(AppController *controller)
-    : QDBusAbstractAdaptor(controller), controller_(controller) {
+    : QObject(controller), controller_(controller) {
   connect(controller_, &AppController::statusChanged, this, &IpcAdaptor::StatusChanged);
 }
 
@@ -132,7 +132,9 @@ bool registerIpc(AppController *controller, IpcAdaptor **adaptor, QString *error
     return false;
   }
   auto *instance = new IpcAdaptor(controller);
-  if (!bus.registerObject(QString::fromLatin1(objectPath), controller, QDBusConnection::ExportAdaptors)) {
+  if (!bus.registerObject(QString::fromLatin1(objectPath), instance,
+                          QDBusConnection::ExportScriptableSlots
+                              | QDBusConnection::ExportScriptableSignals)) {
     if (error != nullptr) *error = bus.lastError().message();
     delete instance;
     bus.unregisterService(QString::fromLatin1(serviceName));
@@ -144,7 +146,10 @@ bool registerIpc(AppController *controller, IpcAdaptor **adaptor, QString *error
 
 void unregisterIpc() {
   QDBusConnection bus = QDBusConnection::sessionBus();
-  if (bus.isConnected()) bus.unregisterService(QString::fromLatin1(serviceName));
+  if (bus.isConnected()) {
+    bus.unregisterObject(QString::fromLatin1(objectPath), QDBusConnection::UnregisterTree);
+    bus.unregisterService(QString::fromLatin1(serviceName));
+  }
 }
 
 bool ipcServiceAvailable() {

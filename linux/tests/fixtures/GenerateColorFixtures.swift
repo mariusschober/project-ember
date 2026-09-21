@@ -10,7 +10,12 @@ private struct FixtureRow: Codable {
 private struct Fixture: Codable {
   let schemaVersion = 1
   let referenceCommit = "41973930103c5c12c5c04715f4a1943ff759628d"
-  let referenceFiles = ["Sources/EmberCore/Models.swift", "Sources/EmberCore/ColorCurve.swift"]
+  let referenceFiles = [
+    "Sources/EmberCore/AppVersion.swift",
+    "Sources/EmberCore/GammaTable.swift",
+    "Sources/EmberCore/Models.swift",
+    "Sources/EmberCore/ColorCurve.swift",
+  ]
   let rows: [FixtureRow]
 }
 

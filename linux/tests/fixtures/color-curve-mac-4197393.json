@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "referenceCommit": "41973930103c5c12c5c04715f4a1943ff759628d",
-  "referenceFiles": ["Sources/EmberCore/Models.swift", "Sources/EmberCore/ColorCurve.swift"],
+  "referenceFiles": ["Sources/EmberCore/AppVersion.swift", "Sources/EmberCore/GammaTable.swift", "Sources/EmberCore/Models.swift", "Sources/EmberCore/ColorCurve.swift"],
   "rows": [
     {"warmth":0,"brightness":0.1,"gains":[1,1,1],"matrixDiagonal":[0.1,0.1,0.1]},
     {"warmth":0,"brightness":0.75,"gains":[1,1,1],"matrixDiagonal":[0.75,0.75,0.75]},

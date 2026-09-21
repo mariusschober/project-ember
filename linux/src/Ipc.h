@@ -1,8 +1,8 @@
 #pragma once
 
 #include <QDBusConnection>
-#include <QDBusAbstractAdaptor>
 #include <QDBusContext>
+#include <QObject>
 #include <QString>
 #include <QVariantList>
 #include <QVariantMap>
@@ -11,7 +11,7 @@ namespace ember {
 
 class AppController;
 
-class IpcAdaptor final : public QDBusAbstractAdaptor, protected QDBusContext {
+class IpcAdaptor final : public QObject, protected QDBusContext {
   Q_OBJECT
   Q_CLASSINFO("D-Bus Interface", "app.projectember.Ember")
 
@@ -19,26 +19,26 @@ public:
   explicit IpcAdaptor(AppController *controller);
 
 public slots:
-  QVariantMap GetStatus() const;
-  qulonglong OpenSettings();
-  qulonglong SetFilterEnabled(bool enabled);
-  qulonglong SetPreset(const QString &preset);
-  qulonglong SetWarmth(double warmth);
-  qulonglong SetBrightness(double brightness);
-  qulonglong SetBacklightLock(bool enabled);
-  qulonglong SetSchedule(bool enabled);
-  qulonglong SetLocation(double latitude, double longitude);
-  qulonglong ClearLocation();
-  qulonglong ResumeAutomation();
-  qulonglong AcceptCurrentHardwareState();
-  qulonglong DiscardUnreadableRecoveryEvidence();
-  qulonglong ReplaceUnreadableSettings();
-  qulonglong Retry();
-  qulonglong Restore();
-  qulonglong Quit();
+  Q_SCRIPTABLE QVariantMap GetStatus() const;
+  Q_SCRIPTABLE qulonglong OpenSettings();
+  Q_SCRIPTABLE qulonglong SetFilterEnabled(bool enabled);
+  Q_SCRIPTABLE qulonglong SetPreset(const QString &preset);
+  Q_SCRIPTABLE qulonglong SetWarmth(double warmth);
+  Q_SCRIPTABLE qulonglong SetBrightness(double brightness);
+  Q_SCRIPTABLE qulonglong SetBacklightLock(bool enabled);
+  Q_SCRIPTABLE qulonglong SetSchedule(bool enabled);
+  Q_SCRIPTABLE qulonglong SetLocation(double latitude, double longitude);
+  Q_SCRIPTABLE qulonglong ClearLocation();
+  Q_SCRIPTABLE qulonglong ResumeAutomation();
+  Q_SCRIPTABLE qulonglong AcceptCurrentHardwareState();
+  Q_SCRIPTABLE qulonglong DiscardUnreadableRecoveryEvidence();
+  Q_SCRIPTABLE qulonglong ReplaceUnreadableSettings();
+  Q_SCRIPTABLE qulonglong Retry();
+  Q_SCRIPTABLE qulonglong Restore();
+  Q_SCRIPTABLE qulonglong Quit();
 
 signals:
-  void StatusChanged(const QVariantMap &status);
+  Q_SCRIPTABLE void StatusChanged(const QVariantMap &status);
 
 private:
   AppController *controller_;
