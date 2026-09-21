@@ -1,13 +1,13 @@
 pkgname=project-ember
 pkgver=0.1.0.alpha1
-pkgrel=1
+pkgrel=2
 pkgdesc='Native Qt/Wayland tray and settings utility for Ember'
 arch=('x86_64')
 url='https://github.com/mariusschober/project-ember'
 depends=('qt6-base' 'qt6-wayland' 'wayland' 'systemd')
 makedepends=('git' 'cmake' 'ninja' 'pkgconf')
 options=('!debug')
-_commit=3214b21a0a083a2cb1dc7b48c9703c41e595a23e
+_commit=5006691980451169f4fa00f78afab4786edcfcff
 source=("project-ember::git+${url}.git#commit=${_commit}")
 sha256sums=('SKIP')
 

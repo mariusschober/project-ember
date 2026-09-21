@@ -93,11 +93,11 @@ jobs:
           package_file="${packages[0]}"
 
           test "$(runuser -u builder -- git -C "$package_dir/src/project-ember" rev-parse HEAD)" = \
-            "3214b21a0a083a2cb1dc7b48c9703c41e595a23e"
+            "5006691980451169f4fa00f78afab4786edcfcff"
           runuser -u builder -- env HOME=/home/builder \
             bash -c 'cd "$1" && makepkg --printsrcinfo' \
             bash "$package_dir" | \
-            grep -F 'commit=3214b21a0a083a2cb1dc7b48c9703c41e595a23e'
+            grep -F 'commit=5006691980451169f4fa00f78afab4786edcfcff'
 
           package_root="$RUNNER_TEMP/project-ember-package-root"
           mkdir -p "$package_root"
@@ -124,7 +124,7 @@ jobs:
           package_name="$(basename "$package_file")"
           package_sha="$(sha256sum "$package_file" | cut -d' ' -f1)"
           {
-            echo "source_commit=3214b21a0a083a2cb1dc7b48c9703c41e595a23e"
+            echo "source_commit=5006691980451169f4fa00f78afab4786edcfcff"
             echo "package=$package_name"
             echo "sha256=$package_sha"
           } | tee "$package_dir/package-provenance.txt"
