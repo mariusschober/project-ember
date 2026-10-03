@@ -690,11 +690,9 @@ final class DisplayCoordinator: NSObject {
         throw EmberError.noCompatibleDisplay
       }
 
-      // Journal before mutation (invariant 1). Built first so the backlight
-      // selection below can consider every journaled entry, including baselines
-      // reused from a previous session.
+      // Assemble the working set first; the journal is written once below, after
+      // the hardware capture and before any mutation (invariant 1).
       recoveryEntries = pendingEntries + freshEntries
-      try rewriteRecoveryRecord()
 
       // Backlight: capture only on a verified compatible built-in target, and
       // only when the current value reads successfully (stored in the recovery
@@ -735,6 +733,12 @@ final class DisplayCoordinator: NSObject {
       }
 
       pendingRestoreCount = pendingEntries.count
+      // Journal before mutation (invariant 1): every baseline, including the
+      // hardware brightness captured just above, is durable before the first
+      // gamma write. Writing earlier as well would persist a record that is
+      // missing the hardware baseline — and `save` snapshots the previous
+      // primary as the last-known-good copy, so that incomplete record could be
+      // the one a crash recovery reads back.
       try rewriteRecoveryRecord()
       diagnostics.append(
         "Recovery journal saved for \(recoveryEntries.count) displays before mutation"
@@ -794,9 +798,9 @@ final class DisplayCoordinator: NSObject {
       }
       controlledIdentities = successful
       failedIdentities = failed
-      // Retain failed-rollback entries: only drop nothing here; pending + fresh
-      // all remain journaled until verified restoration.
-      recoveryEntries = pendingEntries + freshEntries
+      // `recoveryEntries` already holds pending + fresh with the captured
+      // hardware state. Rebuilding it from `freshEntries` here (as 0.4.0 did)
+      // silently discarded that capture and rewrote a hardware-less record.
       // Pending means "journaled but not currently under Ember's control", so a
       // reused baseline that applied successfully is no longer counted as an
       // unplugged display.
@@ -893,8 +897,11 @@ final class DisplayCoordinator: NSObject {
       let message = Self.pendingRestoreMessage(count: report.remaining.count)
       _ = machine.transition(.restoreFailed(message))
       lastError = message
-      // Pending-only disconnected uses calm copy via presentation model.
-      attentionOverride = nil
+      // Pending-only disconnected uses calm copy via presentation model — but a
+      // sticky journal-integrity warning outranks it: "we could not claim an
+      // exact restore" is still true while a display is unplugged, and the
+      // pending count stays visible in the hero detail either way.
+      if !attentionIsSticky { attentionOverride = nil }
       try? rewriteRecoveryRecord()
       diagnostics.append(message, level: "WARN")
     }
@@ -1060,8 +1067,9 @@ final class DisplayCoordinator: NSObject {
         controlledIdentities.removeAll()
         verifiedIdentities.removeAll()
         // An empty work list is not evidence of a healthy state: only clear a
-        // standing warning when this pass actually restored something.
-        if !report.outcomes.isEmpty {
+        // standing warning when this pass actually restored something, and
+        // never clear one that came from an unreadable recovery record.
+        if !report.outcomes.isEmpty, !attentionIsSticky {
           lastError = nil
           attentionOverride = nil
         }
@@ -1220,7 +1228,12 @@ final class DisplayCoordinator: NSObject {
       if machine.state == .reconciling || isDegraded(machine.state) {
         _ = machine.transition(.reconciliationSucceeded)
       }
-      if failedIdentities.isEmpty { lastError = nil; attentionOverride = nil }
+      if failedIdentities.isEmpty {
+        lastError = nil
+        // A sticky journal-integrity warning is not repaired by a successful
+        // reconciliation either; only Retry/Reset clear it.
+        if !attentionIsSticky { attentionOverride = nil }
+      }
       else {
         lastError = failedIdentities.values.joined(separator: " ")
         attentionOverride = AttentionState(

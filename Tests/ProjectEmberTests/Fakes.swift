@@ -148,6 +148,9 @@ final class FakeJournal: JournalStore {
   private(set) var backupRecoveryCount = 0
   /// Most recent record handed to `save`, for asserting what was journaled.
   private(set) var lastSavedRecord: RecoveryRecord?
+  /// Every record handed to `save`, in order, so a test can prove that no
+  /// intermediate write is missing state a crash recovery would need.
+  private(set) var savedRecords: [RecoveryRecord] = []
 
   init(exists: Bool = false, outcome: JournalLoadOutcome = .noJournal) {
     self.exists = exists
@@ -159,6 +162,7 @@ final class FakeJournal: JournalStore {
   func save(_ record: RecoveryRecord) throws {
     saveCount += 1
     lastSavedRecord = record
+    savedRecords.append(record)
     exists = true
     outcome = .loaded(record)
   }

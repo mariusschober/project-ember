@@ -539,3 +539,105 @@ struct EnergyBehaviourTests {
     #expect(EmberTiming.transformCoalesceInterval == 0.05)
   }
 }
+
+// MARK: - Findings from the second adversarial round
+
+@Suite("Journal writes and sticky warnings (round 2)")
+@MainActor
+struct SecondRoundRegressionTests {
+
+  @Test("A healthy display event does not wipe a sticky journal warning")
+  func stickyWarningSurvivesReconciliation() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    let journal = FakeJournal(exists: true, outcome: .corrupt(reason: "torn write"))
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays, journal: journal, settings: EmberSettings(filterEnabled: true))
+
+    coordinator.start()
+    #expect(coordinator.currentSnapshot().attentionTitle == "Needs attention")
+
+    coordinator.setFilterEnabled(true)
+    _ = await waitUntil("activation") { coordinator.currentSnapshot().runtimeState == .active }
+    #expect(
+      coordinator.currentSnapshot().attentionTitle == "Needs attention",
+      "activation must not clear an unreadable-journal warning")
+
+    // An ordinary topology event reconciles successfully — and used to clear the
+    // warning on its way through the success branch.
+    coordinator.handleDisplayEvent(displayID: 1, flags: 0, isBegin: false)
+    _ = await waitUntil("reconciliation") {
+      !coordinator.currentSnapshot().isBusy
+        && coordinator.currentSnapshot().runtimeState == .active
+    }
+
+    #expect(
+      coordinator.currentSnapshot().attentionTitle == "Needs attention",
+      "a successful reconciliation is not evidence that the torn journal was readable")
+  }
+
+  @Test("Activation journals the hardware baseline it captured, every time")
+  func everyJournalWriteCarriesHardware() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    let backlight = FakeBacklight()
+    let journal = FakeJournal()
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays,
+      backlight: backlight,
+      journal: journal,
+      settings: EmberSettings(filterEnabled: true, backlightLockEnabled: true)
+    )
+
+    coordinator.start()
+    _ = await waitUntil("activation") { coordinator.currentSnapshot().runtimeState == .active }
+
+    #expect(backlight.engageCount == 1)
+    #expect(
+      journal.saveCount == 2,
+      "one write before the first gamma write, one after: got \(journal.saveCount)")
+    // A journal write that is missing the hardware baseline can become the
+    // last-known-good copy, and a crash recovery would then leave brightness
+    // pinned with ambient compensation off — the exact state M2/M3 prevent.
+    for (index, record) in journal.savedRecords.enumerated() {
+      #expect(
+        record.displays.allSatisfy { $0.hardware.hasValues },
+        "journal write #\(index + 1) is missing the captured hardware baseline")
+    }
+  }
+}
+
+@Suite("Sticky warnings vs pending restores")
+@MainActor
+struct StickyPendingInteractionTests {
+
+  @Test("A pending restore does not replace a sticky journal warning")
+  func pendingRestoreKeepsStickyWarning() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    let journal = FakeJournal(
+      exists: true, outcome: .ioFailure("permission denied"))
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays, journal: journal, settings: EmberSettings(filterEnabled: true))
+
+    coordinator.start()
+    #expect(coordinator.currentSnapshot().attentionTitle == "Needs attention")
+
+    coordinator.setFilterEnabled(true)
+    _ = await waitUntil("activation") { coordinator.currentSnapshot().runtimeState == .active }
+
+    // The display goes away, then Ember is switched off: the restore is pending,
+    // which normally earns the calm "Ember is off" copy. With a sticky warning
+    // standing, the serious message must not be replaced by the calm one.
+    displays.targets = []
+    coordinator.setFilterEnabled(false)
+    _ = await waitUntil("restore attempt") {
+      coordinator.currentSnapshot().pendingRestoreCount == 1
+    }
+
+    #expect(coordinator.currentSnapshot().pendingRestoreCount == 1)
+    #expect(
+      coordinator.currentSnapshot().attentionTitle == "Needs attention",
+      "an unreadable journal outranks the calm pending-restore copy")
+  }
+}
