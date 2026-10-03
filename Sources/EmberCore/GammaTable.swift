@@ -16,12 +16,26 @@ public struct GammaTable: Codable, Equatable, Sendable {
   }
 
   public var isValid: Bool {
-    !red.isEmpty
+    red.count >= 2
       && red.count == green.count
       && green.count == blue.count
       && red.allSatisfy(\.isFinite)
       && green.allSatisfy(\.isFinite)
       && blue.allSatisfy(\.isFinite)
+  }
+
+  /// Stricter check for a table that came from disk and is about to be written
+  /// to a panel. `isValid` accepts any non-empty shape because a table read from
+  /// a display is trusted; a *decoded* table is not. A single-sample table
+  /// resamples into a constant one (`resample` repeats the only value), which
+  /// would nail the panel to one value and destroy what the user actually had,
+  /// so a flat table is rejected here rather than written.
+  public var isPlausibleBaseline: Bool {
+    guard isValid else { return false }
+    let redConstant = red.allSatisfy { $0 == red[0] }
+    let greenConstant = green.allSatisfy { $0 == green[0] }
+    let blueConstant = blue.allSatisfy { $0 == blue[0] }
+    return !(redConstant && greenConstant && blueConstant)
   }
 
   public static func identity(sampleCount: Int = 256) -> GammaTable {

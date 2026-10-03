@@ -1,77 +1,112 @@
 import Foundation
 
-// MARK: - Test seams (0.4.0)
+// MARK: - Injection seams (0.5.0)
 //
-// Minimal indirection to make reconciliation deterministic in tests.
-// No abstract framework — only the I/O boundaries the reconciler needs.
+// These protocols exist so the shipped orchestration can be exercised without
+// mutating a real display. 0.4.0 declared a set of "test seams" here that
+// nothing — not even the tests — conformed to, while DisplayCoordinator took
+// concrete controllers; the safety-critical logic was therefore only reachable
+// by running the destructive hardware self-tests. The types below are the seams
+// the coordinator actually depends on, and `Tests/ProjectEmberTests` drives
+// them with fakes.
 
-public struct EnumeratedDisplay: Equatable, Sendable {
+/// A display Ember can address, with the identity used to match saved
+/// baselines to physical panels.
+public struct DisplayTarget: Equatable, Sendable {
   public let displayID: UInt32
   public let identity: DisplayIdentity
   public let gammaCapacity: UInt32
-  public let isOnline: Bool
-  public let isActive: Bool
-  public let isMirrored: Bool
 
-  public init(
-    displayID: UInt32,
-    identity: DisplayIdentity,
-    gammaCapacity: UInt32,
-    isOnline: Bool = true,
-    isActive: Bool = true,
-    isMirrored: Bool = false
-  ) {
+  public init(displayID: UInt32, identity: DisplayIdentity, gammaCapacity: UInt32) {
     self.displayID = displayID
     self.identity = identity
     self.gammaCapacity = gammaCapacity
-    self.isOnline = isOnline
-    self.isActive = isActive
-    self.isMirrored = isMirrored
   }
 
-  public var supportsGamma: Bool { gammaCapacity >= 2 && isOnline && isActive && !isMirrored }
+  /// A writable transfer table needs at least two samples. Enumeration already
+  /// filters online/active/non-mirrored displays.
+  public var supportsGamma: Bool { gammaCapacity >= 2 }
 }
 
-public protocol DisplayEnumerator: Sendable {
-  func enumerate() throws -> [EnumeratedDisplay]
-  func target(matching identity: DisplayIdentity) throws -> EnumeratedDisplay?
+/// What the built-in backlight can actually do, discovered at runtime.
+public struct BacklightCapability: Equatable, Sendable {
+  public let brightnessControl: Bool
+  public let ambientLightControl: Bool
+
+  public init(brightnessControl: Bool, ambientLightControl: Bool) {
+    self.brightnessControl = brightnessControl
+    self.ambientLightControl = ambientLightControl
+  }
+
+  public static let unavailable = BacklightCapability(
+    brightnessControl: false,
+    ambientLightControl: false
+  )
 }
 
-public protocol GammaController: Sendable {
-  func captureBaseline(for displayID: UInt32, identity: DisplayIdentity, capacity: UInt32) throws -> DisplayBaseline
+/// Colour-table control across every display Ember is allowed to mutate.
+///
+/// Main-actor isolated: every caller is the coordinator, and display I/O from
+/// more than one thread is exactly the kind of data race Swift 6 is meant to
+/// stop. Test fakes implement this on the main actor for the same reason.
+@MainActor
+public protocol DisplayControlling {
+  /// Online, active, non-mirrored displays. Order is not significant.
+  func displayTargets() throws -> [DisplayTarget]
+  /// Reads and records a display's current table. Never mutates.
+  func captureBaseline(for target: DisplayTarget) throws -> DisplayBaseline
   func readTable(displayID: UInt32, capacity: UInt32) throws -> GammaTable
-  func write(_ table: GammaTable, displayID: UInt32, capacity: UInt32, identity: DisplayIdentity) throws
-  func transformedTable(settings: EmberSettings, from baseline: GammaTable) -> GammaTable
+  /// Writes the transform derived from `baseline` and verifies the readback.
+  func apply(settings: EmberSettings, to baseline: DisplayBaseline) throws
+  /// Writes the saved table and verifies the readback. Recovery entries are
+  /// dropped only after this succeeds.
+  func restoreVerified(_ baseline: DisplayBaseline) throws
+  /// Read-only check: is the requested transform currently installed?
+  func isTransformInstalled(settings: EmberSettings, baseline: DisplayBaseline) -> Bool
+  /// Resolves a saved identity to a live display, or nil when it is offline.
+  /// Ambiguous identities resolve to nil: no mutation without a unique match.
+  func target(matching identity: DisplayIdentity) throws -> DisplayTarget?
+  /// Identity keys that currently match more than one online display.
+  func ambiguousIdentityKeys() throws -> Set<String>
+  /// Last-resort system colour reset when no exact baseline can be applied.
+  func forceColorSyncRestore()
 }
 
-public protocol HardwareBacklightController: Sendable {
-  func captureBaseline(displayID: UInt32) throws -> HardwareBaseline
-  func readBrightness(displayID: UInt32) throws -> Float
-  func readAmbientEnabled(displayID: UInt32) throws -> Bool?
-  func writeBrightness(_ value: Float, displayID: UInt32) throws
-  func writeAmbientEnabled(_ value: Bool, displayID: UInt32) throws
+/// The built-in panel's hardware backlight (private DisplayServices path).
+/// Every entry point must refuse a display that is not built in.
+@MainActor
+public protocol BacklightControlling {
+  func capability(for displayID: UInt32) -> BacklightCapability
+  func captureBaseline(for displayID: UInt32) throws -> HardwareBaseline
+  /// Takes over the backlight: captures nothing, so callers must have captured
+  /// a restorable baseline first.
+  func engage(on displayID: UInt32) throws
+  /// Read-only drift check used by the guard; true means a write is needed.
+  func needsEngagement(on displayID: UInt32) -> Bool
+  func readBrightness(_ displayID: UInt32) throws -> Float
+  func restore(_ baseline: HardwareBaseline, on displayID: UInt32) throws
 }
 
-public protocol JournalStore: Sendable {
+@MainActor
+public protocol JournalStore {
+  var exists: Bool { get }
   func loadOutcome() -> JournalLoadOutcome
   func save(_ record: RecoveryRecord) throws
   func clear() throws
+  @discardableResult
   func quarantineCorruptJournal() -> URL?
-  var exists: Bool { get }
+  /// Used when the primary journal cannot be decoded. Implementations move the
+  /// unreadable file aside and return the last-known-good record, or nil when
+  /// no usable backup exists. Never returns a record without proving it
+  /// decodes, and never deletes the unreadable file.
+  func recoverCorruptJournalFromBackup() -> RecoveryRecord?
 }
 
-extension RecoveryJournal: JournalStore {}
-
-public protocol SettingsPersisting: Sendable {
+@MainActor
+public protocol SettingsPersisting {
   func load() -> EmberSettings
   func save(_ settings: EmberSettings) throws
 }
 
-public protocol Clock: Sendable {
-  func now() -> Date
-}
-
-public struct SystemClock: Clock, Sendable {
-  public init() {}
-  public func now() -> Date { Date() }
-}
+extension RecoveryJournal: JournalStore {}
+extension SettingsStore: SettingsPersisting {}

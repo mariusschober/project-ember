@@ -6,24 +6,61 @@ import EmberCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private let coordinator: DisplayCoordinator
   private var statusItem: NSStatusItem!
+  private lazy var statusMenu = NSMenu()
   private let popover = NSPopover()
   private var panelController: ControlPanelViewController!
   private var diagnosticsController: DiagnosticsWindowController!
   private var workspaceObservers: [NSObjectProtocol] = []
   private var systemObservers: [NSObjectProtocol] = []
   private var displayObserver: DisplayReconfigurationObserver?
+  #if DEBUG
+  /// Visual-QA window. DEBUG only: `--show-panel`/`--snapshot-ui` are ignored
+  /// outright by a release build (they exist to render the real UI for review).
   private var qaWindow: NSWindow?
+  #endif
   private var visualQAMode = false
+  /// Last status-item presentation; the health tick re-renders the same state
+  /// every 30 s and must not touch the status item for an unchanged snapshot.
+  private var lastStatusPresentation: StatusItemPresentation?
+
+  /// First-launch popover flag; also the App Store reviewer's first ten seconds.
+  private static let didPresentFirstRunKey = "app.projectember.didPresentFirstRunHint"
+
+  #if DEBUG
+  /// True only when a QA flag was passed. QA mode gets an isolated journal (see
+  /// `qaRecoveryJournal`) and never activates the app.
+  private static var isVisualQARequested: Bool {
+    CommandLine.arguments.contains("--show-panel")
+      || CommandLine.arguments.contains("--snapshot-ui")
+  }
+
+  /// QA runs must never touch the user's real recovery journal: `--snapshot-ui`
+  /// next to an installed instance would otherwise race it (audit m11).
+  private static var qaRecoveryJournal: RecoveryJournal {
+    let base = FileManager.default.temporaryDirectory
+      .appendingPathComponent("project-ember-visual-qa", isDirectory: true)
+    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    return RecoveryJournal(
+      fileURL: base.appendingPathComponent("display-recovery-v1.json"))
+  }
+  #endif
+
+  /// The QA flags compile to `false` in release builds: the QA window, its
+  /// isolated journal and the snapshot path exist only in DEBUG (audit m11).
+  private static var visualQARequested: Bool {
+    #if DEBUG
+    return isVisualQARequested
+    #else
+    return false
+    #endif
+  }
 
   override init() {
-    let isVisualQA =
-      CommandLine.arguments.contains("--show-panel")
-      || CommandLine.arguments.contains("--snapshot-ui")
-    if isVisualQA,
-      let defaults = UserDefaults(suiteName: "app.projectember.visual-qa")
-    {
+    #if DEBUG
+    if Self.isVisualQARequested, let defaults = UserDefaults(suiteName: "app.projectember.visual-qa") {
       coordinator = DisplayCoordinator(
         settingsStore: SettingsStore(defaults: defaults),
+        recoveryJournal: Self.qaRecoveryJournal,
         solarController: SolarScheduleController(
           locationStore: SolarLocationStore(defaults: defaults)
         )
@@ -31,13 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     } else {
       coordinator = DisplayCoordinator()
     }
+    #else
+    coordinator = DisplayCoordinator()
+    #endif
     super.init()
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    visualQAMode =
-      CommandLine.arguments.contains("--show-panel")
-      || CommandLine.arguments.contains("--snapshot-ui")
+    visualQAMode = Self.visualQARequested
     NSApp.setActivationPolicy(visualQAMode ? .regular : .accessory)
     setupDiagnostics()
     setupPanel()
@@ -45,21 +83,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     setupLifecycleObservers()
 
     coordinator.onSnapshot = { [weak self] snapshot in
-      self?.panelController.render(snapshot)
-      self?.renderStatusItem(snapshot)
+      guard let self else { return }
+      // PERF-F3: a health tick must not rebuild an invisible panel. The popover
+      // renders when it is shown (showPopover), so an off-screen snapshot is
+      // only ever used for the status item.
+      if self.isPanelVisible { self.panelController.render(snapshot) }
+      self.renderStatusItem(snapshot)
     }
     coordinator.start()
-    panelController.render(coordinator.currentSnapshot())
+    #if DEBUG
+    if visualQAMode {
+      panelController.render(coordinator.currentSnapshot())
+      qaWindow?.setContentSize(panelController.preferredContentSize)
+    }
+    #endif
     renderStatusItem(coordinator.currentSnapshot())
 
+    #if DEBUG
     if visualQAMode {
       DispatchQueue.main.async { [weak self] in
-        NSApp.activate(ignoringOtherApps: true)
+        // No NSApp.activate: a QA render must never steal focus from whatever
+        // the user is doing (audit m11).
         self?.qaWindow?.center()
         self?.qaWindow?.makeKeyAndOrderFront(nil)
         self?.captureSnapshotIfRequested()
       }
+      return
     }
+    #endif
+
+    // First run: open the panel once and explain what Ember does and how to
+    // turn it on. Once per install, then never again.
+    DispatchQueue.main.async { [weak self] in
+      self?.presentFirstRunIfNeeded()
+    }
+  }
+
+  private var isPanelVisible: Bool {
+    if popover.isShown { return true }
+    #if DEBUG
+    return visualQAMode && qaWindow?.isVisible == true
+    #else
+    return false
+    #endif
+  }
+
+  private func presentFirstRunIfNeeded() {
+    guard !visualQAMode else { return }
+    let defaults = UserDefaults.standard
+    guard !defaults.bool(forKey: Self.didPresentFirstRunKey) else { return }
+    defaults.set(true, forKey: Self.didPresentFirstRunKey)
+    panelController.setFirstRunHint(true)
+    showPopover()
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -95,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self?.diagnosticsController.present()
       }
     )
+    #if DEBUG
     if visualQAMode {
       let window = NSWindow(
         contentRect: NSRect(
@@ -111,13 +187,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       window.contentViewController = panelController
       window.isReleasedWhenClosed = false
       qaWindow = window
-    } else {
-      popover.behavior = .transient
-      popover.animates = true
-      popover.appearance = NSAppearance(named: .darkAqua)
-      popover.contentSize = panelController.preferredContentSize
-      popover.contentViewController = panelController
+      return
     }
+    #endif
+    popover.behavior = .transient
+    popover.animates = true
+    popover.appearance = NSAppearance(named: .darkAqua)
+    popover.contentSize = panelController.preferredContentSize
+    popover.contentViewController = panelController
   }
 
   private func setupStatusItem() {
@@ -130,7 +207,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     button.imagePosition = .imageOnly
     button.toolTip = "Project Ember"
     button.setAccessibilityLabel("Project Ember display controls")
-    button.setAccessibilityHelp("Left click follows Menu bar click setting. Right click always opens controls.")
+    button.setAccessibilityHelp(
+      "Left click follows the Menu bar click setting. Right click opens a menu with controls, diagnostics, about and quit."
+    )
+    buildStatusMenu()
+  }
+
+  /// Right-click menu. Quitting must never depend on the popover being visible
+  /// or reachable: this app has no Dock icon and no app menu (audit C1).
+  private func buildStatusMenu() {
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+
+    let open = NSMenuItem(
+      title: "Open Controls", action: #selector(menuOpenControls), keyEquivalent: "")
+    open.target = self
+    menu.addItem(open)
+
+    menu.addItem(.separator())
+
+    let diagnostics = NSMenuItem(
+      title: "Diagnostics…", action: #selector(menuOpenDiagnostics), keyEquivalent: "")
+    diagnostics.target = self
+    menu.addItem(diagnostics)
+
+    let about = NSMenuItem(
+      title: "About Project Ember", action: #selector(menuOpenAbout), keyEquivalent: "")
+    about.target = self
+    menu.addItem(about)
+
+    menu.addItem(.separator())
+
+    let quit = NSMenuItem(
+      title: "Quit Project Ember", action: #selector(menuQuit), keyEquivalent: "q")
+    quit.target = self
+    menu.addItem(quit)
+
+    statusMenu = menu
+  }
+
+  private func showStatusMenu() {
+    guard let button = statusItem.button else { return }
+    statusMenu.popUp(
+      positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY - 4), in: button)
   }
 
   private func setupLifecycleObservers() {
@@ -194,6 +313,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private lazy var cachedActiveImage: NSImage = EmberDotIcon.activeImage()
   private lazy var cachedDegradedImage: NSImage = EmberDotIcon.degradedImage()
 
+  /// What the status item currently shows. Comparing this before touching the
+  /// button keeps the 30 s health tick (and every slider event) free when the
+  /// visible state has not changed.
+  private struct StatusItemPresentation: Equatable {
+    let description: String
+    let value: String
+  }
+
   private func renderStatusItem(_ snapshot: EmberSnapshot) {
     guard let button = statusItem.button else { return }
     let image: NSImage
@@ -232,14 +359,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         value = snapshot.statusDetail
       }
     }
+    let presentation = StatusItemPresentation(description: description, value: value)
+    guard presentation != lastStatusPresentation else { return }
+    lastStatusPresentation = presentation
     button.image = image
-    button.image?.isTemplate = false
+    // Never force isTemplate: the inactive and attention dots are template
+    // images so the system tints them for a light or dark menu bar, which is
+    // exactly the 1.80:1 failure the audit measured in Light Mode (M5).
     button.image?.size = NSSize(width: 16, height: 16)
     button.toolTip = description
     button.setAccessibilityLabel(description)
     button.setAccessibilityValue(value)
     button.setAccessibilityHelp(
-      "Left click: \(snapshot.settings.menuBarPrimaryAction == .toggleEmber ? "toggle Ember" : "open controls"). Right click always opens controls."
+      "Left click: \(snapshot.settings.menuBarPrimaryAction == .toggleEmber ? "toggle Ember" : "open controls"). Right click opens a menu with controls, diagnostics, about and quit."
     )
   }
 
@@ -248,13 +380,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       togglePopover()
       return
     }
-    // Right-click / secondary / two-finger / Control-click always opens controls.
+    // Right-click / secondary / two-finger / Control-click opens the menu, so
+    // Quit and Diagnostics are reachable even when the popover cannot be.
     if event.type == .rightMouseUp {
-      openControls()
+      showStatusMenu()
       return
     }
     if event.type == .leftMouseUp, event.modifierFlags.contains(.control) {
-      openControls()
+      showStatusMenu()
       return
     }
     // Left click routes according to preference.
@@ -271,21 +404,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  // MARK: - Status menu actions
+
+  @objc private func menuOpenControls() {
+    openControls()
+  }
+
+  @objc private func menuOpenDiagnostics() {
+    if popover.isShown { popover.performClose(nil) }
+    diagnosticsController.present()
+  }
+
+  @objc private func menuQuit() {
+    NSApp.terminate(nil)
+  }
+
+  /// About: the product sentence, the privacy statement and the license, with
+  /// the version read from the bundle. The first-run popover explains what
+  /// Ember does; this is where the reviewer finds the ownership terms.
+  @objc private func menuOpenAbout() {
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    let credits = NSMutableAttributedString(
+      string:
+        """
+        Warms and dims your display after dark. Ember reports what it can verify: it does not measure PWM and makes no medical claims.
+
+        Privacy: no accounts, no analytics, no network access. Settings, approximate location and the display recovery journal stay on this Mac.
+
+        © 2026 Marius Schober. All rights reserved.
+        """,
+      attributes: [
+        .font: NSFont.systemFont(ofSize: 11),
+        .foregroundColor: NSColor.labelColor,
+      ])
+    let options: [NSApplication.AboutPanelOptionKey: Any] = [
+      .applicationName: "Project Ember",
+      .applicationVersion: version ?? AppVersion.marketing,
+      .version: build ?? "",
+      .credits: credits,
+    ]
+    NSApp.orderFrontStandardAboutPanel(options: options)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
   private func openControls() {
+    #if DEBUG
     if visualQAMode {
       qaWindow?.makeKeyAndOrderFront(nil)
-      NSApp.activate(ignoringOtherApps: true)
       return
     }
+    #endif
     if !popover.isShown { showPopover() }
   }
 
   @objc private func togglePopover() {
+    #if DEBUG
     if visualQAMode {
       qaWindow?.makeKeyAndOrderFront(nil)
-      NSApp.activate(ignoringOtherApps: true)
       return
     }
+    #endif
     if popover.isShown {
       popover.performClose(nil)
     } else {
@@ -302,14 +481,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private func showPopover() {
     guard let button = statusItem.button else { return }
-    popover.contentSize = panelController.preferredContentSize
+    // Render first: the render measures the content and updates
+    // preferredContentSize, which is the size the popover must open at.
     panelController.render(coordinator.currentSnapshot())
+    popover.contentSize = panelController.preferredContentSize
     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     if let win = popover.contentViewController?.view.window {
       win.appearance = NSAppearance(named: .darkAqua)
     }
   }
 
+  #if DEBUG
   private func captureSnapshotIfRequested() {
     guard let argumentIndex = CommandLine.arguments.firstIndex(of: "--snapshot-ui"),
       CommandLine.arguments.indices.contains(argumentIndex + 1)
@@ -340,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       NSApp.terminate(nil)
     }
   }
+  #endif
 
   private func diagnosticsFailure(_ message: String) {
     coordinator.diagnostics.append(message, level: "ERROR")

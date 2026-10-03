@@ -1,0 +1,72 @@
+Project Ember — Proprietary License
+Copyright © 2026 Marius Schober. All rights reserved.
+
+Project Ember is proprietary software. This file is the complete licence for
+Project Ember ("the Software") and supersedes any earlier statement about
+licensing in this repository.
+
+1. GRANT — THE OFFICIAL BINARY
+
+   You may download, install, and use the official, unmodified Project Ember
+   application distributed by the copyright holder, free of charge, on Macs
+   that you own or control, for personal or commercial purposes.
+
+   You may give the official, unmodified installer to someone else only by
+   pointing them at the official download page. You may not mirror, re-host,
+   bundle, or redistribute the installer or the application yourself.
+
+2. SOURCE CODE — NO RIGHTS GRANTED
+
+   The source code in this repository is made available for reading,
+   reference, and review only. No licence, express or implied, is granted to
+   use, copy, modify, adapt, translate, compile, republish, redistribute, sell,
+   sublicense, or create derivative works from the source code, in whole or in
+   part. In particular:
+
+   a. you may not build a modified or rebranded application from this source
+      and distribute it;
+   b. you may not incorporate any part of this source into another product;
+   c. you may not remove or alter this licence, the copyright notice, or any
+      attribution in the Software.
+
+   Building the source for your own private, non-distributed use is permitted;
+   everything in this section still applies to anything you distribute.
+
+3. RESTRICTIONS
+
+   You may not reverse engineer, decompile, or disassemble the Software except
+   to the extent that applicable law expressly permits it despite this
+   limitation. You may not circumvent, disable, or interfere with the
+   Software's safety behaviour, including its display-recovery journal and its
+   restore-on-quit handling, nor use the Software in a way that could leave a
+   display in a state the user cannot recover without the official
+   application.
+
+4. NO TRADEMARK RIGHTS
+
+   "Project Ember" and the Project Ember icon identify the official product.
+   This licence grants no right to use them for a modified or redistributed
+   build.
+
+5. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. THE COPYRIGHT HOLDER
+   IS NOT LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE
+   SOFTWARE OR ITS USE.
+
+6. TERMINATION
+
+   This licence terminates automatically if you breach any of its terms. On
+   termination you must stop using the Software and delete all copies you hold.
+
+7. CONTACT
+
+   Licensing questions, including requests for any use not granted above:
+   see the contact details in SECURITY.md or the author's website,
+   https://mariusschober.com.
+
+Project Ember is distributed outside the Mac App Store only: Backlight Lock
+uses the private DisplayServices framework, which the App Store does not
+permit.

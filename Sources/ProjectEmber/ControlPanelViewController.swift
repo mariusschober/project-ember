@@ -26,15 +26,23 @@ final class ControlPanelViewController: NSViewController {
   private let footerBar = EmberFooterBarView()
 
   private let scrollContent = NSStackView()
+  /// Real scroll view: on short displays (or any state taller than the screen)
+  /// the panel scrolls instead of clipping the Diagnostics/Quit row.
+  private let scrollView = NSScrollView()
+  private let documentView = FlippedDocumentView()
+  /// One-time first-launch explanation, shown above the hero.
+  private let firstRunHint = EmberFirstRunHintView()
+  /// Requested hint visibility, remembered so a call made before the view is
+  /// loaded still applies (AppDelegate asks for it before the popover opens).
+  private var wantsFirstRunHint = false
 
   init(coordinator: DisplayCoordinator, showDiagnostics: @escaping () -> Void) {
     self.coordinator = coordinator
     self.showDiagnostics = showDiagnostics
     super.init(nibName: nil, bundle: nil)
-    // Fitted to content: header + hero + presets + sliders + 4 settings rows
-    // (worst case with location button) + footer actions + footer bar.
-    // Verified by snapshot; no scroll view, so this must fit everything.
-    preferredContentSize = NSSize(width: EmberMetrics.popoverWidth, height: 810)
+    // Provisional size only: render() measures the content and sets the real
+    // height, clamped to the screen (see preferredPanelSize).
+    preferredContentSize = NSSize(width: EmberMetrics.popoverWidth, height: 700)
   }
 
   @available(*, unavailable)
@@ -133,33 +141,48 @@ final class ControlPanelViewController: NSViewController {
     footerBar.translatesAutoresizingMaskIntoConstraints = false
     footerBar.setText(version: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String).map { "v\($0)" } ?? AppVersion.displayString)
 
-    // Content: plain fitted container with the footer pinned below it — no
-    // scroll view. The whole panel must fit; copy and row heights are budgeted
-    // so even the location-permission state fits without scrolling.
+    // Content: a scrolling document pinned to the fixed content width, with
+    // the footer bar outside the scroll view so Quit/Diagnostics are always
+    // one small scroll away rather than clipped off the panel (audit C1).
+    // The document width is a constant, never derived from bounds, so the
+    // width↔wrap feedback loop DesignTokens warns about cannot return here.
     scrollContent.orientation = .vertical
     scrollContent.alignment = .leading
     scrollContent.spacing = EmberMetrics.stackSpacing
     scrollContent.translatesAutoresizingMaskIntoConstraints = false
 
-    // Container for content with padding
-    let container = NSView()
-    container.translatesAutoresizingMaskIntoConstraints = false
-    background.addSubview(container)
-    container.addSubview(scrollContent)
+    documentView.addSubview(scrollContent)
+
+    scrollView.drawsBackground = false
+    scrollView.borderType = .noBorder
+    scrollView.hasVerticalScroller = true
+    scrollView.autohidesScrollers = true
+    // Overlay scrollers never steal width from the fixed 390 pt column.
+    scrollView.scrollerStyle = .overlay
+    scrollView.horizontalScrollElasticity = .none
+    scrollView.verticalScrollElasticity = .automatic
+    scrollView.documentView = documentView
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+    background.addSubview(scrollView)
     background.addSubview(footerBar)
 
     NSLayoutConstraint.activate([
-      container.leadingAnchor.constraint(
+      scrollView.leadingAnchor.constraint(
         equalTo: background.leadingAnchor, constant: EmberMetrics.contentHInset),
-      container.trailingAnchor.constraint(
+      scrollView.trailingAnchor.constraint(
         equalTo: background.trailingAnchor, constant: -EmberMetrics.contentHInset),
-      container.topAnchor.constraint(equalTo: background.topAnchor, constant: 12),
-      container.bottomAnchor.constraint(equalTo: footerBar.topAnchor, constant: -10),
+      scrollView.topAnchor.constraint(
+        equalTo: background.topAnchor, constant: EmberMetrics.panelTopInset),
+      scrollView.bottomAnchor.constraint(
+        equalTo: footerBar.topAnchor, constant: -EmberMetrics.panelBottomGap),
 
-      scrollContent.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-      scrollContent.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      scrollContent.topAnchor.constraint(equalTo: container.topAnchor),
-      scrollContent.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+      // Top/leading/trailing only: the document's height comes from the content
+      // (syncDocumentSize), never from the clip view, so scrolling cannot feed
+      // back into layout.
+      scrollContent.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+      scrollContent.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+      scrollContent.topAnchor.constraint(equalTo: documentView.topAnchor),
 
       footerBar.leadingAnchor.constraint(equalTo: background.leadingAnchor),
       footerBar.trailingAnchor.constraint(equalTo: background.trailingAnchor),
@@ -170,6 +193,11 @@ final class ControlPanelViewController: NSViewController {
     // Now populate stack – width constraints are safe now that scrollContent has superview
     scrollContent.addArrangedSubview(headerView)
     headerView.widthAnchor.constraint(equalTo: scrollContent.widthAnchor).isActive = true
+
+    // First-launch explanation, hidden unless AppDelegate asks for it.
+    firstRunHint.isHidden = !wantsFirstRunHint
+    scrollContent.addArrangedSubview(firstRunHint)
+    firstRunHint.widthAnchor.constraint(equalTo: scrollContent.widthAnchor).isActive = true
 
     scrollContent.addArrangedSubview(heroView)
     heroView.widthAnchor.constraint(equalTo: scrollContent.widthAnchor).isActive = true
@@ -228,8 +256,69 @@ final class ControlPanelViewController: NSViewController {
 
   override func viewWillDisappear() {
     super.viewWillDisappear()
+    // The first-launch explanation is once-per-install; the popover closing is
+    // proof enough that it was seen.
+    setFirstRunHint(false)
+    // Reopening always starts at the top of the panel.
+    scrollView.contentView.scroll(to: .zero)
+    scrollView.reflectScrolledClipView(scrollView.contentView)
     // Flush debounced settings/journal; stop orb animation when popover closes.
     coordinator.flushPendingSettings()
+  }
+
+  // MARK: - Content-driven size (audit C1 / M11)
+
+  /// Shows or hides the one-time first-launch explanation.
+  func setFirstRunHint(_ visible: Bool) {
+    wantsFirstRunHint = visible
+    guard isViewLoaded else { return }
+    // Target state, not the requested flag: comparing `isHidden == visible`
+    // here inverts the test and the card could never be hidden again.
+    let targetHidden = !visible
+    guard firstRunHint.isHidden != targetHidden else { return }
+    firstRunHint.isHidden = targetHidden
+    updatePreferredContentSize()
+  }
+
+  /// Sizes the scrolling document to the content's natural height at the fixed
+  /// content width. The height is measured from the stack (whose bottom is
+  /// deliberately unpinned), so the clip view's own size can never feed back
+  /// into wrapping.
+  private func syncDocumentSize() {
+    let width = EmberMetrics.contentWidth
+    // Generous first pass: the stack resolves its natural height, then the
+    // document adopts exactly that.
+    documentView.setFrameSize(NSSize(width: width, height: 4000))
+    documentView.layoutSubtreeIfNeeded()
+    let natural = max(scrollContent.frame.height, scrollContent.fittingSize.height)
+    let height = max(1, natural.rounded(.up))
+    if documentView.frame.size != NSSize(width: width, height: height)
+      || documentView.frame.origin != .zero
+    {
+      documentView.setFrameSize(NSSize(width: width, height: height))
+      documentView.setFrameOrigin(.zero)
+      documentView.layoutSubtreeIfNeeded()
+    }
+  }
+
+  /// Content-driven panel size, clamped to the space that is actually available
+  /// below the status item. Pure, so short-screen geometry can be exercised
+  /// (offscreen probes, tests) without touching a display.
+  func preferredPanelSize(forVisibleFrameHeight visibleHeight: CGFloat) -> NSSize {
+    syncDocumentSize()
+    let natural =
+      EmberMetrics.panelTopInset + documentView.frame.height
+      + EmberMetrics.panelBottomGap + EmberMetrics.footerBarHeight
+    let available = max(160, visibleHeight - EmberMetrics.popoverChromeHeight)
+    let height = min(max(natural.rounded(.up), EmberMetrics.panelMinHeight), available)
+    return NSSize(width: EmberMetrics.popoverWidth, height: height)
+  }
+
+  private func updatePreferredContentSize() {
+    guard isViewLoaded else { return }
+    let visibleHeight = (view.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
+    let size = preferredPanelSize(forVisibleFrameHeight: visibleHeight)
+    if preferredContentSize != size { preferredContentSize = size }
   }
 
   // MARK: - Render (logic preserved, visuals upgraded)
@@ -290,7 +379,9 @@ final class ControlPanelViewController: NSViewController {
       heroTitle = attentionTitle
       heroDetail = snapshot.attentionMessage ?? snapshot.statusDetail
       metaIconName = "exclamationmark.triangle.fill"
-      metaText = heroDetail
+      // Never the body sentence again: the second copy was always ellipsized
+      // (audit C3). The meta row is a short status, not a second paragraph.
+      metaText = metaStatus(for: snapshot)
     } else {
       switch snapshot.runtimeState {
       case .active where isActive:
@@ -366,45 +457,52 @@ final class ControlPanelViewController: NSViewController {
         heroTitle = "Needs attention"
         heroDetail = message
         metaIconName = "exclamationmark.triangle.fill"
-        metaText = message
+        metaText = metaStatus(for: snapshot)
       case .activating, .reconciling:
         heroTitle = "Applying…"
         heroDetail = "Saving every display state first…"
         metaIconName = "arrow.triangle.2.circlepath"
-        metaText = heroDetail
+        metaText = "Working…"
       case .restoring(let intent):
         heroTitle = "Restoring…"
         heroDetail = intent == .sleep ? "Preparing every display for sleep…" : "Returning every display to its saved state…"
         metaIconName = "arrow.triangle.2.circlepath"
-        metaText = heroDetail
+        metaText = intent == .sleep ? "Preparing for sleep" : "Restoring saved state"
       case .suspended:
         heroTitle = "Paused for sleep"
         heroDetail = "Ember will safely re-evaluate after wake."
         metaIconName = "moon.zzz.fill"
-        metaText = heroDetail
+        metaText = "Paused"
       default: // .off
         if snapshot.statusTitle == "No compatible display" {
           heroTitle = "No compatible display"
           heroDetail = snapshot.statusDetail
           metaIconName = "display.trianglebadge.exclamationmark"
-          metaText = snapshot.statusDetail
+          metaText = metaStatus(for: snapshot)
         } else if snapshot.statusTitle == "Needs attention" {
           heroTitle = snapshot.statusTitle
           heroDetail = snapshot.statusDetail
           metaIconName = "exclamationmark.triangle.fill"
-          metaText = snapshot.statusDetail
+          metaText = metaStatus(for: snapshot)
+        } else if let attentionMessage = snapshot.attentionMessage {
+          // Info-level attention (e.g. "Waiting for display") used to be dropped
+          // entirely while the panel still said "Ready".
+          heroTitle = snapshot.attentionTitle ?? "Ember is off"
+          heroDetail = attentionMessage
+          metaIconName = "clock"
+          metaText = metaStatus(for: snapshot)
         } else {
-          heroTitle = "Ready"
+          // The off state is stated out loud and the orb is named as the way to
+          // turn Ember on (audit C6).
+          heroTitle = "Ember is off"
           if snapshot.displayAvailable {
-            heroDetail = "Your original display state is untouched."
+            heroDetail = "Your original display state is untouched. Click the orb to turn it on."
             metaIconName = "checkmark.circle.fill"
-            let count = snapshot.availableDisplayCount
-            metaText = "\(count) compatible \(count == 1 ? "display" : "displays") ready"
           } else {
             heroDetail = snapshot.statusDetail
             metaIconName = "circle.fill"
-            metaText = heroDetail
           }
+          metaText = metaStatus(for: snapshot)
         }
       }
     }
@@ -424,14 +522,22 @@ final class ControlPanelViewController: NSViewController {
     // Warmth/brightness value alpha
     warmthValue.alphaValue = controlsEnabled ? 1 : 0.45
     brightnessValue.alphaValue = controlsEnabled ? 1 : 0.45
+    // VoiceOver reads the slider's value as a number by default; the formatted
+    // readout ("~2700 K" / "62%") is what the panel actually shows.
+    warmthSlider.setAccessibilityValueDescription(warmthValue.stringValue)
+    brightnessSlider.setAccessibilityValueDescription(brightnessValue.stringValue)
 
     backlightRow.toggle.isEnabled = controlsEnabled && snapshot.backlightAvailable
     backlightRow.alphaValue = (controlsEnabled && snapshot.backlightAvailable) ? 1 : 0.55
     sunScheduleRow.toggle.isEnabled = !snapshot.isBusy
+    sunScheduleRow.alphaValue = snapshot.isBusy ? 0.6 : 1
+    // Launch row needs the same dimming as the other two: a disabled switch that
+    // looks enabled is a lie the user only discovers by clicking (audit M8).
     launchRow.toggle.isEnabled = !snapshot.isBusy
+    launchRow.alphaValue = snapshot.isBusy ? 0.6 : 1
 
-    // Backlight capability caption — accurate product language, budgeted to
-    // two lines so the panel fits without scrolling.
+    // Backlight capability caption — accurate product language, complete at the
+    // three-line cap so the PWM qualification is never cut mid-sentence (C4).
     if snapshot.backlightAvailable {
       let cap: String
       if snapshot.availableDisplayCount > 1 {
@@ -482,7 +588,27 @@ final class ControlPanelViewController: NSViewController {
     sunScheduleRow.alphaValue = snapshot.isBusy ? 0.6 : 1
     // Behavior row — compact setting with right-click caption.
     behaviorRow.render(settings.menuBarPrimaryAction)
-    // Footer bar already set – ensure version stays
+
+    // Content changed: re-measure the document and re-clamp the panel height
+    // (audit C1/M11 — the panel used to be a fixed 810 pt with a dead band).
+    updatePreferredContentSize()
+  }
+
+  /// Compact one-line status for the hero meta row. The body sentence already
+  /// lives in the hero detail; repeating it here produced an always-ellipsized
+  /// duplicate (audit C3) and, at 198 pt, widened the whole panel (C2).
+  private func metaStatus(for snapshot: EmberSnapshot) -> String {
+    if snapshot.pendingRestoreCount > 0 {
+      let count = snapshot.pendingRestoreCount
+      return "\(count) \(count == 1 ? "display" : "displays") pending restore"
+    }
+    if snapshot.failedDisplayCount > 0 {
+      let count = snapshot.failedDisplayCount
+      return "\(count) \(count == 1 ? "display" : "displays") need attention"
+    }
+    guard snapshot.displayAvailable else { return "Connect a supported display" }
+    let count = snapshot.availableDisplayCount
+    return "\(count) \(count == 1 ? "display" : "displays") available"
   }
 
   // MARK: - Builders (match screenshot hierarchy)
@@ -527,6 +653,11 @@ final class ControlPanelViewController: NSViewController {
 
     slider.translatesAutoresizingMaskIntoConstraints = false
     slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+    // The thumb is drawn 22 pt but NSSlider's intrinsic height is 16 pt, so the
+    // top/bottom 3 pt of the visible thumb used to drop clicks (audit M12).
+    slider.heightAnchor.constraint(
+      greaterThanOrEqualToConstant: EmberMetrics.sliderHitHeight
+    ).isActive = true
 
     let sliderRow = NSStackView(views: [leadingPad, icon, slider])
     sliderRow.orientation = .horizontal
@@ -547,6 +678,17 @@ final class ControlPanelViewController: NSViewController {
 
   // MARK: - Actions – preserved verbatim logic
 
+  /// Using a preset or a slider while Ember is off turns Ember on, matching the
+  /// status-item toggle semantics. Without this the control animates, the value
+  /// label changes, and nothing happens on screen (audit M1/C6).
+  private func ensureEmberIsOn() {
+    let snapshot = coordinator.currentSnapshot()
+    guard snapshot.displayAvailable, !snapshot.isBusy, !snapshot.isObservedActive,
+      !snapshot.settings.filterEnabled
+    else { return }
+    coordinator.setFilterEnabled(true)
+  }
+
   @objc private func toggleMaster() {
     // Observed truth drives the toggle, not desired state alone.
     coordinator.setFilterEnabled(!coordinator.currentSnapshot().isObservedActive)
@@ -557,6 +699,7 @@ final class ControlPanelViewController: NSViewController {
     let presets: [EmberPreset] = [.neutral, .evening, .pureRed]
     guard pillControl.selectedSegment >= 0, pillControl.selectedSegment < presets.count else { return }
     coordinator.applyPreset(presets[pillControl.selectedSegment])
+    ensureEmberIsOn()
   }
 
   @objc private func changeWarmth() {
@@ -570,11 +713,13 @@ final class ControlPanelViewController: NSViewController {
       return "Pure Red"
     }()
     coordinator.setWarmth(warmthSlider.doubleValue / 100)
+    ensureEmberIsOn()
   }
 
   @objc private func changeBrightness() {
     brightnessValue.stringValue = "\(Int((brightnessSlider.doubleValue).rounded()))%"
     coordinator.setApparentBrightness(brightnessSlider.doubleValue / 100)
+    ensureEmberIsOn()
   }
 
   @objc private func toggleBacklightLock() {
@@ -600,4 +745,11 @@ final class ControlPanelViewController: NSViewController {
   @objc private func quitApplication() {
     NSApp.terminate(nil)
   }
+}
+
+/// Scroll-view document that lays out top-down, so the clip view's origin
+/// (0, 0) is the top of the panel — the header — rather than its bottom edge.
+@MainActor
+private final class FlippedDocumentView: NSView {
+  override var isFlipped: Bool { true }
 }

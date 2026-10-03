@@ -271,9 +271,9 @@ final class SolarScheduleController: NSObject, @preconcurrency CLLocationManager
     guard enabled else { return }
     guard let location = locations.last(where: { $0.horizontalAccuracy >= 0 }) else { return }
     // Validate Core Location timestamp: reject stale cached fixes instead of
-    // stamping them as newly captured at now().
-    let age = now().timeIntervalSince(location.timestamp)
-    guard age >= -60, age <= 5 * 60 else {
+    // stamping them as newly captured at now(). The rule lives in EmberCore so
+    // it has exactly one definition.
+    guard LocationFreshness.isFresh(locationTimestamp: location.timestamp, now: now()) else {
       // Stale fix: keep existing schedule, ensure a retry is pending.
       scheduleLocationRetry()
       publish(

@@ -20,12 +20,17 @@ personal content.
 - Approximate location (rounded to 0.1°) stays on-device for Sun scheduling.
 - Backlight Lock dynamically loads the private `DisplayServices.framework`;
   direct distribution is the supported path. See README distribution notes.
+- The signed release carries the Hardened Runtime with exactly one entitlement,
+  `com.apple.security.personal-information.location`
+  (`Resources/ProjectEmber.entitlements`), which CoreLocation requires once the
+  runtime is enabled. There is no App Sandbox entitlement: Project Ember is a
+  direct download, not an App Store product.
 
-## License decision (owner action required)
+## Licence
 
-The repository currently has no explicit license. Do not ship a public 1.0
-until the owner decides:
-
-- Proprietary product: add an explicit copyright/all-rights-reserved notice and
-  consider making the source repository private.
-- Open-source product: owner selects and approves a license before public 1.0.
+Project Ember is proprietary software. Copyright © 2026 Marius Schober. All
+rights reserved. You may install and use the official, unmodified binary free
+of charge; the source is published for reading and reference only, and
+redistribution or derivative distribution of the source is not permitted. The
+complete terms are in [LICENSE](LICENSE) and match the `NSHumanReadableCopyright`
+notice in `Resources/Info.plist`.

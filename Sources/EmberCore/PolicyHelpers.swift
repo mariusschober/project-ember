@@ -1,24 +1,36 @@
 import Foundation
 
-// MARK: - Pure helpers for testability (0.4.0)
+// MARK: - Pure policy helpers
+//
+// These are the single source of truth for rules the app applies at runtime:
+// the coordinator, the display controller and the solar controller call them
+// rather than inlining a copy. 0.4.0 declared them and then duplicated the
+// logic, so the tests covering them proved nothing about the shipped app.
 
 /// Tracks external-override timestamps per display; bounded recovery enters a
-/// truthful degraded state after 3 resets within 60s instead of fighting forever.
+/// truthful degraded state after `threshold` resets within `window` instead of
+/// fighting forever.
 public struct OverrideTracker: Equatable, Sendable {
   private var history: [String: [Date]] = [:]
-  public init() {}
+  private let window: TimeInterval
+  private let threshold: Int
+
+  public init(window: TimeInterval = 60, threshold: Int = 3) {
+    self.window = window
+    self.threshold = max(threshold, 1)
+  }
 
   /// Records a detected reset. Returns true when the bounded threshold is crossed.
   public mutating func recordReset(key: String, at date: Date = Date()) -> Bool {
     var list = history[key] ?? []
     list.append(date)
-    list = list.filter { date.timeIntervalSince($0) < 60 }
+    list = list.filter { date.timeIntervalSince($0) < window }
     history[key] = list
-    return list.count >= 3
+    return list.count >= threshold
   }
 
   public func count(key: String, at date: Date = Date()) -> Int {
-    (history[key] ?? []).filter { date.timeIntervalSince($0) < 60 }.count
+    (history[key] ?? []).filter { date.timeIntervalSince($0) < window }.count
   }
 
   public mutating func reset() { history.removeAll() }

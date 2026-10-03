@@ -6,11 +6,11 @@ short-wavelength output and provide software dimming. Its optional Backlight
 Lock attempts to keep a compatible built-in display's hardware backlight at
 full power while dimming in software.
 
-Current version: **0.4.0** (reliability and interaction release candidate).
-Not 1.0: 1.0 waits for the HDMI/display-topology acceptance matrix on real
-hardware plus Developer ID-signed, notarized public artifacts.
+Current version: **0.5.0** (release-hardening release). Not 1.0: 1.0 waits for
+the HDMI/display-topology acceptance matrix on real hardware plus
+Developer ID-signed, notarized public artifacts.
 
-## What works in 0.4.0
+## What works in 0.5.0
 
 - One shared warmth and software-brightness profile on every compatible display
 - Warmth from neutral through 6500–2000 K plus a red-channel-only Pure Red endpoint
@@ -38,16 +38,18 @@ to 0.1°, and performs all solar calculations on-device.
 
 ## Install
 
-Direct distribution only for 0.4.0 (Backlight Lock uses private
-DisplayServices; treat Mac App Store as incompatible unless Backlight Lock is
-removed or compiled out).
+Direct distribution only: Backlight Lock uses private DisplayServices, so treat
+the Mac App Store as incompatible unless Backlight Lock is removed.
 
-1. Open `Project-Ember-0.4.0.dmg` (public path) or
-   `Project-Ember-0.4.0-local-beta.dmg` (ad-hoc local path).
+1. Open `Project-Ember-0.5.0.dmg` (signed public release) or
+   `Project-Ember-0.5.0-local-beta.dmg` (ad-hoc local build).
 2. Drag Project Ember into Applications.
-3. Ad-hoc local builds: Control-click the app, choose **Open**, and confirm once.
-   Signed/notarized builds open normally.
+3. Signed/notarized builds open normally. Ad-hoc local builds: Control-click the
+   app, choose **Open**, and confirm once.
 4. Click the menu-bar indicator.
+
+Before opening a downloaded DMG, verify it — the commands are in
+[docs/RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md#verify-a-downloaded-dmg).
 
 The first display mutation happens only after the hero orb is clicked on or
 after the user explicitly enables Sun schedule and the current time is after
@@ -56,7 +58,9 @@ before macOS exposes a writable target; Ember applies promptly once
 controllable and never flashes unchanged displays.
 
 Updates: replace the app bundle with the newer signed DMG contents. Settings
-(0.3.0-compatible) and recovery records migrate forward.
+and recovery records are schema v2 and migrate forward, and 0.5.0 does not
+change the schema, so a downgrade to 0.4.0 still reads them. The rollback steps
+are in [docs/RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md#rollback).
 
 ## Sun schedule
 
@@ -71,6 +75,11 @@ turns the preference off with an explanation.
 
 If permission is denied, use **Open Location Settings…** in the control panel.
 No place name, coordinate, or schedule data leaves the Mac.
+
+The signed release requests location under the Hardened Runtime, which requires
+`com.apple.security.personal-information.location` in
+`Resources/ProjectEmber.entitlements`. Without that entitlement the schedule
+would silently never receive a fix in the build users install.
 
 ## Safe recovery
 
@@ -115,13 +124,29 @@ journaled baseline before staying off or following an enabled Sun schedule.
 
 Run `scripts/build-local-beta.sh` from the ProjectEmber folder. The script
 discovers the active SDK via `xcrun`, targets macOS 14 on arm64
-(Apple-Silicon-only product decision), runs unit tests plus deterministic core
-checks, builds the bundle, ad-hoc signs it, verifies the signature, and
-creates the DMG.
+(Apple-Silicon-only product decision), runs the unit tests and deterministic
+core checks **in the same release build tree it ships**, assembles the bundle
+with the version stamped from `Sources/EmberCore/AppVersion.swift`, ad-hoc
+signs it, verifies the signature and entitlements, creates the DMG, and writes
+a SHA-256 file.
+
+Hardware acceptance tests are destructive: they write real gamma/backlight
+state and the recovery journal. They exist only in DEBUG builds
+(`swift build --disable-sandbox`, then run `.build/debug/ProjectEmber` with the
+flag), and the shipped release binary exposes only the read-only
+`--system-probe`. Passing a test flag to a release build prints an explanation
+and exits non-zero. See [docs/TEST_PLAN.md](docs/TEST_PLAN.md).
 
 Public release: `scripts/build-production-release.sh` (Developer ID
 Application, Hardened Runtime, secure timestamp, notarytool submit/staple,
-codesign/spctl/stapler validation, DMG smoke-check, SHA-256).
+codesign/spctl/stapler validation, DMG smoke-check, SHA-256). Every gate fails
+the script rather than warning. The full runbook, the required Apple
+credentials, and the verification and rollback procedures are in
+[docs/RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md).
+
+The version lives in exactly one place, `Sources/EmberCore/AppVersion.swift`;
+`scripts/version.sh --check` fails if `Resources/Info.plist`, an assembled
+bundle, or a script pins a different number, and CI runs that check.
 
 ## Privacy
 
@@ -138,10 +163,15 @@ data. See `SECURITY.md`.
   pre-OS output control.
 - Display spectral variability; software-dimming banding at very low levels.
 - No PWM measurement.
-- No explicit license yet — owner must choose proprietary
-  (copyright/all-rights-reserved, consider private repo) or approve an
-  open-source license before public 1.0.
+- Public downloads require a Developer ID-signed, notarized DMG; the scripts
+  and CI gates are in place, but producing that artifact needs an Apple
+  Developer Program membership and the credentials listed in
+  [docs/RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md#credentials).
 
-## License decision (owner action required)
+## Licence
 
-No explicit license is present. See `SECURITY.md`.
+Project Ember is proprietary software, Copyright © 2026 Marius Schober, all
+rights reserved. The official, unmodified binary may be installed and used
+free of charge; the source is published for reading and reference only, and
+redistribution or derivative distribution is not permitted. The complete terms
+are in [LICENSE](LICENSE).

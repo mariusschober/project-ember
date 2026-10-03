@@ -35,9 +35,11 @@ final class EmberPillControl: NSView {
     container.wantsLayer = true
     container.layer?.cornerRadius = EmberMetrics.pillCorner
     container.layer?.masksToBounds = true
-    container.layer?.backgroundColor = NSColor(calibratedWhite: 0.15, alpha: 1.0).cgColor
+    container.layer?.backgroundColor = EmberColor.controlFill.cgColor
     container.layer?.borderWidth = 1
-    container.layer?.borderColor = EmberColor.borderSubtle.cgColor
+    // Boundary contrast: the segmented control is the primary control in the
+    // panel and its edge must be perceivable (audit M4, WCAG 1.4.11).
+    container.layer?.borderColor = EmberColor.borderControl.cgColor
     container.translatesAutoresizingMaskIntoConstraints = false
     addSubview(container)
 
@@ -68,8 +70,10 @@ final class EmberPillControl: NSView {
       // remove default bezel
       b.wantsLayer = true
       b.layer?.backgroundColor = NSColor.clear.cgColor
-      // For accessibility
+      // For accessibility: each segment is a radio button inside the group, so
+      // VoiceOver can announce the active preset (audit m8).
       b.setAccessibilityLabel(title)
+      b.setAccessibilityRole(.radioButton)
       buttons.append(b)
       stack.addArrangedSubview(b)
     }
@@ -125,6 +129,7 @@ final class EmberPillControl: NSView {
       for b in buttons {
         b.contentTintColor = EmberColor.textSecondary
         b.font = EmberFont.pill()
+        b.setAccessibilityValue(0)
       }
       return
     }
@@ -134,6 +139,7 @@ final class EmberPillControl: NSView {
     // segments brighten slightly (Reduce-Motion-safe: instant tint, no animation).
     for (idx, b) in buttons.enumerated() {
       let selected = idx == selectedSegment
+      b.setAccessibilityValue(selected ? 1 : 0)
       if selected {
         b.contentTintColor = .white
         b.font = EmberFont.pillSelected()
@@ -153,7 +159,7 @@ final class EmberPillControl: NSView {
       indicator.layer?.borderWidth = 0
     }
     // Dim dividers when selection covers? keep subtle
-    container.layer?.borderColor = EmberColor.borderSubtle.cgColor
+    container.layer?.borderColor = EmberColor.borderControl.cgColor
   }
 
   private var hoveredSegment: Int = -1
@@ -227,12 +233,19 @@ final class EmberPillControl: NSView {
 
   @objc private func tap(_ sender: NSButton) {
     let idx = sender.tag
+    // A click on the already-selected segment is not a new selection.
     guard idx != selectedSegment else { return }
-    guard isEnabled else { return }
-    // Single update path: setSelectedSegment owns selection + layout.
-    setSelectedSegment(idx, animated: true)
-    // send action to target if set, or via onSelect
-    if let target = target, let action = action {
+    selectAndNotify(idx, animated: true)
+  }
+
+  /// Selects `idx` and tells the target/action + `onSelect` about it. Both the
+  /// mouse path and the arrow-key path go through here: `keyDown` used to call
+  /// `tap`, which early-returns for the freshly selected index, so the
+  /// highlight moved and nothing was applied (audit M7).
+  private func selectAndNotify(_ idx: Int, animated: Bool) {
+    guard isEnabled, idx >= 0, idx < buttons.count else { return }
+    setSelectedSegment(idx, animated: animated)
+    if let target, let action {
       NSApp.sendAction(action, to: target, from: self)
     }
     onSelect?(idx)
@@ -260,14 +273,14 @@ final class EmberPillControl: NSView {
   override var acceptsFirstResponder: Bool { true }
   override func becomeFirstResponder() -> Bool { true }
   override func keyDown(with event: NSEvent) {
-    // Arrow-key navigation for segmented/radio-group semantics.
+    // Arrow-key navigation for segmented/radio-group semantics. Keyboard
+    // selection is a real selection: it applies the preset exactly like a click.
     if event.keyCode == 123 || event.keyCode == 124 {
       let delta = event.keyCode == 124 ? 1 : -1
       let count = buttons.count
       guard count > 0 else { super.keyDown(with: event); return }
       let next = ((selectedSegment < 0 ? (delta > 0 ? -1 : 0) : selectedSegment) + delta + count) % count
-      setSelectedSegment(next, animated: true)
-      tap(buttons[next])
+      selectAndNotify(next, animated: true)
       return
     }
     super.keyDown(with: event)

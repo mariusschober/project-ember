@@ -20,7 +20,11 @@ enum EmberColor {
   static let surfaceCardElevated = NSColor(calibratedRed: 0.22, green: 0.21, blue: 0.21, alpha: 1.0)
   static let surfaceHeroFrom = NSColor(calibratedRed: 0.28, green: 0.16, blue: 0.14, alpha: 1.0)
   static let surfaceHeroTo = NSColor(calibratedRed: 0.20, green: 0.13, blue: 0.12, alpha: 1.0)
-  static let surfaceHeroActiveFrom = NSColor(calibratedRed: 0.36, green: 0.18, blue: 0.14, alpha: 1.0)
+  // Active hero top-left stop. Darkened from 0.36/0.18/0.14: ember400 on the
+  // old stop measured 4.12:1, and the 15 pt semibold title is not "large text"
+  // under WCAG, so it needs 4.5:1. New stop gives 4.78:1 and keeps the ember
+  // accent instead of falling back to textPrimary (audit M2).
+  static let surfaceHeroActiveFrom = NSColor(calibratedRed: 0.30, green: 0.15, blue: 0.12, alpha: 1.0)
   static let surfaceHeroActiveTo = NSColor(calibratedRed: 0.24, green: 0.13, blue: 0.11, alpha: 1.0)
 
   // Text — all below 18pt meet ≥4.5:1 on card surface in composited state.
@@ -34,14 +38,28 @@ enum EmberColor {
 
   // Borders / dividers
   static let borderSubtle = NSColor(calibratedWhite: 1.0, alpha: 0.07)
-  static let borderCard = NSColor(calibratedWhite: 1.0, alpha: 0.08)
+  // Component outlines. WCAG 1.4.11 wants >=3:1 against the adjacent surface;
+  // 0.08 white composited over the card measured 1.28:1 (audit M4). 0.38 white
+  // composites to ~0.46 over the panel (3.5:1) and ~0.50 over the card (3.3:1):
+  // a visible edge that still reads as a hairline, not a highlight.
+  static let borderCard = NSColor(calibratedWhite: 1.0, alpha: 0.38)
+  static let borderControl = NSColor(calibratedWhite: 1.0, alpha: 0.38)
   static let borderHero = NSColor(calibratedRed: 1.00, green: 0.30, blue: 0.18, alpha: 0.14)
   static let divider = NSColor(calibratedWhite: 1.0, alpha: 0.06)
+
+  // Structural greys for control travel/tracks. Audit M4 measured the unfilled
+  // slider track at 1.41:1 and the off switch at 1.64:1 against their surface.
+  static let controlBoundary = NSColor(calibratedWhite: 0.42, alpha: 1.0)
+  /// Segmented-control and switch bodies: dark fill, bright outline so the
+  /// component edge — not the whole surface — carries the contrast.
+  static let controlFill = NSColor(calibratedWhite: 0.20, alpha: 1.0)
 
   // Functional
   static let success = NSColor(calibratedRed: 0.26, green: 0.78, blue: 0.38, alpha: 1.0)
   static let warning = NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.24, alpha: 1.0)
-  static let error = NSColor(calibratedRed: 1.00, green: 0.27, blue: 0.23, alpha: 1.0)
+  // Lightened from 1.00/0.27/0.23: the 9.5 pt error caption measured 3.84:1 on
+  // surfaceCard (audit M3); this value measures 4.9:1 and still reads as error.
+  static let error = NSColor(calibratedRed: 1.00, green: 0.44, blue: 0.39, alpha: 1.0)
 
   static let sliderTrackWarmNeutral = NSColor(calibratedRed: 0.45, green: 0.43, blue: 0.42, alpha: 1.0)
   static let sliderTrackWarmMid = NSColor(calibratedRed: 1.00, green: 0.55, blue: 0.18, alpha: 1.0)
@@ -69,6 +87,11 @@ enum EmberFont {
 enum EmberMetrics {
   static let popoverWidth: CGFloat = 390
   static let contentHInset: CGFloat = 16
+  /// Width of the content column. Constant on purpose: the panel width is
+  /// pinned at 390 and the scroll view's document is constrained to this
+  /// constant, so no wrap width is ever derived from `bounds` (see the comment
+  /// on the wrap-width constants below).
+  static let contentWidth: CGFloat = popoverWidth - (contentHInset * 2)
   static let cardCorner: CGFloat = 14
   static let pillCorner: CGFloat = 18
   static let rowHeight: CGFloat = 56
@@ -90,6 +113,10 @@ enum EmberMetrics {
   static let sliderThumb: CGFloat = 22
   static let sliderTrackHeight: CGFloat = 4
   static let sliderEndInset: CGFloat = 14 // thumbSize/2 + 3: keeps thumbs fully visible at 0%/100%
+  /// Minimum interactive height for a slider. The thumb is drawn 22 pt and the
+  /// view's intrinsic height is 16 pt, so 3 pt of the visible thumb at top and
+  /// bottom belonged to the parent and dropped clicks (audit M12).
+  static let sliderHitHeight: CGFloat = 24
   // Deterministic wrapping widths. These MUST be static constants, never
   // derived from bounds at layout time: deriving wrap widths from bounds
   // creates a width↔wrap feedback loop (width sets wrap, wrap sets intrinsic
@@ -99,11 +126,29 @@ enum EmberMetrics {
   static let rowTextWidth: CGFloat = 244
   // Hero text = 390 − 32 (content) − 16 (leading) − 12 (gap) − 124 (orb) − 8.
   static let heroTextWidth: CGFloat = 198
+  // The meta row shares the hero text column with an 11 pt icon + 5 pt gap,
+  // which the 198 pt budget did not account for: meta text at 198 widened the
+  // whole panel to 407 pt on long attention copy (audit C2).
+  static let heroMetaIconWidth: CGFloat = 11
+  static let heroMetaIconGap: CGFloat = 5
+  static let heroMetaTextWidth: CGFloat = heroTextWidth - heroMetaIconWidth - heroMetaIconGap
+  /// Detail labels are capped at three lines: every shipped sentence (including
+  /// the PWM qualification and the pending-restore message) fits inside that,
+  /// and the panel scrolls rather than clipping if a state grows (audit C4).
+  static let detailMaxLines: Int = 3
   static let stackSpacing: CGFloat = 10
   static let heroHeight: CGFloat = 128
   static let headerHeight: CGFloat = 40
   static let footerBarHeight: CGFloat = 36
+  // Panel chrome around the scrolling document: top inset + footer gap + bar.
+  static let panelTopInset: CGFloat = 12
+  static let panelBottomGap: CGFloat = 10
+  /// Space a popover loses above its content when anchored under the status
+  /// item (status item + gap); used to clamp the content-driven height.
+  static let popoverChromeHeight: CGFloat = 41
+  static let panelMinHeight: CGFloat = 320
 }
+
 
 extension NSColor {
   func withAlpha(_ a: CGFloat) -> NSColor { withAlphaComponent(a) }

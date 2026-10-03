@@ -6,10 +6,16 @@ import EmberCore
 @MainActor
 enum ProjectEmberMain {
   static func main() {
+    // Read-only probe: shipped in release builds as a support/diagnostic command.
     if CommandLine.arguments.contains("--system-probe") {
       runReadOnlySystemProbe()
       return
     }
+
+#if DEBUG
+    // Destructive hardware self-tests. They write real gamma/backlight state and
+    // the production recovery journal, so they exist only in development builds
+    // (audit REL-1); docs/TEST_PLAN.md documents the debug-build procedure.
     if CommandLine.arguments.contains("--prepare-crash-recovery-test") {
       prepareCrashRecoveryTest()
       return
@@ -26,6 +32,9 @@ enum ProjectEmberMain {
       runReversibleSystemSelfTest()
       return
     }
+#else
+    rejectDestructiveTestFlagIfPresent()
+#endif
 
     let application = NSApplication.shared
     let delegate = AppDelegate()
@@ -34,6 +43,33 @@ enum ProjectEmberMain {
       application.run()
     }
   }
+
+#if !DEBUG
+  /// Destructive self-test flags a release build must refuse (audit REL-1).
+  private static let destructiveTestFlags = [
+    "--prepare-crash-recovery-test",
+    "--recover-only",
+    "--lifecycle-self-test",
+    "--system-self-test",
+  ]
+
+  /// A release build answers a destructive self-test flag with one line on
+  /// stderr and exit 64 instead of silently falling through to a normal launch.
+  /// A mistyped flag must never mutate a display, and a curious user must get an
+  /// answer rather than a menu-bar app appearing.
+  private static func rejectDestructiveTestFlagIfPresent() {
+    guard let flag = destructiveTestFlags.first(where: { CommandLine.arguments.contains($0) })
+    else { return }
+    FileHandle.standardError.write(
+      Data(
+        """
+        error: \(flag) is a destructive hardware self-test and is only \
+        available in a development build.
+        The released binary exposes --system-probe (read-only) only; see docs/TEST_PLAN.md.
+        """.utf8))
+    Darwin.exit(64)
+  }
+#endif
 
   private static func runReadOnlySystemProbe() {
     let gamma = GammaDisplayController()
@@ -481,9 +517,14 @@ enum ProjectEmberMain {
         HardwareBaseline(brightness: 0.65, ambientLightCompensationEnabled: nil),
         on: initialDisplay.displayID
       )
-      // Guard interval is 5 s with 1 s tolerance (reduced from 1 s for 80% fewer
-      // wakeups). Wait long enough for at least one guard firing.
-      RunLoop.main.run(until: Date().addingTimeInterval(6.5))
+      // Wait for a full backlight-guard interval plus the guard's tolerance and a
+      // margin, so at least one guard firing is observed. The interval comes from
+      // EmberCore.EmberTiming — the same constant the coordinator schedules — so
+      // this self-test cannot drift out of sync with the guard (0.4.0 waited a
+      // hardcoded 6.5 s for a 5 s guard).
+      let guardWait =
+        EmberTiming.backlightGuardInterval + EmberTiming.backlightGuardTolerance + 1.0
+      RunLoop.main.run(until: Date().addingTimeInterval(guardWait))
       activeHardware = try backlight.captureBaseline(for: initialDisplay.displayID)
       try require(
         (activeHardware.brightness ?? 0) >= 0.97,

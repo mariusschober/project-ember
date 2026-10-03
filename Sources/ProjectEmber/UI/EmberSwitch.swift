@@ -51,13 +51,21 @@ final class EmberSwitch: NSControl {
 
     updateVisual(animated: false)
     setAccessibilityRole(.checkBox)
-    setAccessibilityLabel("Toggle")
+    // No accessibility label here on purpose: the row title (or the caller's
+    // descriptive label) is the label. A constant "Toggle" made all three
+    // switches indistinguishable to VoiceOver (audit C5).
   }
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
 
   override var intrinsicContentSize: NSSize { NSSize(width: 44, height: 26) }
+
+  /// A disabled control must look disabled (audit M8): the panel disables this
+  /// switch while the app is busy, and previously nothing redrew.
+  override var isEnabled: Bool {
+    didSet { updateVisual(animated: false) }
+  }
 
   override func layout() {
     super.layout()
@@ -74,9 +82,11 @@ final class EmberSwitch: NSControl {
 
   private func updateVisual(animated: Bool) {
     let onColor = EmberColor.ember500.cgColor
-    let offColor = NSColor(calibratedWhite: 0.26, alpha: 1.0).cgColor
+    let offColor = NSColor(calibratedWhite: 0.30, alpha: 1.0).cgColor
     let borderOn = NSColor(calibratedRed: 1.0, green: 0.45, blue: 0.30, alpha: 0.22).cgColor
-    let borderOff = NSColor.white.withAlphaComponent(0.06).cgColor
+    // Off-track outline carries the >=3:1 boundary WCAG 1.4.11 asks for; the
+    // fill alone measured 1.64:1 on the card (audit M4).
+    let borderOff = EmberColor.borderControl.cgColor
     let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     let shouldAnimate = animated && window != nil && !reduceMotion
 
@@ -92,6 +102,10 @@ final class EmberSwitch: NSControl {
     }
     trackLayer.backgroundColor = _isOn ? onColor : offColor
     trackLayer.borderColor = _isOn ? borderOn : borderOff
+    // Dim the whole control when disabled so "nothing happens" is visible
+    // before the click, not after it.
+    trackLayer.opacity = isEnabled ? 1 : 0.5
+    thumbLayer.opacity = isEnabled ? 1 : 0.6
 
     if shouldAnimate {
       NSAnimationContext.runAnimationGroup { ctx in
@@ -155,7 +169,6 @@ final class EmberSwitch: NSControl {
     return true
   }
   override func accessibilityRole() -> NSAccessibility.Role? { .checkBox }
-  override func accessibilityLabel() -> String? { "Toggle" }
   func setState(_ s: NSControl.StateValue) {
     setOn(s == .on, animated: false)
   }
@@ -206,7 +219,7 @@ final class EmberToggleRowView: NSView {
     detailLabel.stringValue = detail
     detailLabel.font = EmberFont.rowDetail()
     detailLabel.textColor = EmberColor.textSecondary
-    detailLabel.maximumNumberOfLines = 2
+    detailLabel.maximumNumberOfLines = EmberMetrics.detailMaxLines
     detailLabel.preferredMaxLayoutWidth = EmberMetrics.rowTextWidth
     detailLabel.lineBreakMode = .byWordWrapping
     // Required vertical hugging (with a fixed wrap width) gives the row a
@@ -272,6 +285,10 @@ final class EmberToggleRowView: NSView {
     ])
     // Ensure textStack doesn't compress toggle
     textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+    // VoiceOver announces the row title as the switch's title instead of
+    // leaving the title as a free-floating static text element (audit C5).
+    toggle.setAccessibilityTitleUIElement(titleLabel)
   }
 
   @available(*, unavailable)
@@ -287,10 +304,8 @@ final class EmberToggleRowView: NSView {
     }
     if showButton {
       if actionButton == nil {
-        let b = NSButton(title: buttonTitle ?? "Open Location Settings…", target: target, action: action)
-        b.bezelStyle = .inline
-        b.font = .systemFont(ofSize: 9.5, weight: .medium)
-        b.contentTintColor = EmberColor.ember400
+        let b = EmberActionButton(
+          title: buttonTitle ?? "Open Location Settings…", target: target, action: action)
         b.translatesAutoresizingMaskIntoConstraints = false
         if let textStack = captionLabel.superview as? NSStackView {
           textStack.addArrangedSubview(b)
@@ -304,6 +319,84 @@ final class EmberToggleRowView: NSView {
       actionButton?.action = action
     } else {
       actionButton?.isHidden = true
+    }
+  }
+}
+
+/// Small bordered action that sits inside a row's text column.
+///
+/// The recovery action in the location dead end used `.inline` with
+/// `contentTintColor`, which draws no border and does not colour a bordered
+/// button's title — it rendered as disabled body copy in the one state where
+/// the user must act (audit M6). This is a real bezel with an ember title and
+/// the codebase's pointing-hand hover language.
+@MainActor
+final class EmberActionButton: NSButton {
+  private var cursorPushed = false
+  private var hoverArea: NSTrackingArea?
+
+  init(title: String, target: AnyObject?, action: Selector?) {
+    super.init(frame: .zero)
+    self.title = title
+    self.target = target
+    self.action = action
+    bezelStyle = .rounded
+    controlSize = .small
+    font = .systemFont(ofSize: 11, weight: .medium)
+    setAccessibilityRole(.button)
+    setAccessibilityHelp("Opens System Settings so Sun schedule can use your location.")
+    setTitleAttributes()
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError() }
+
+  override var title: String {
+    didSet { setTitleAttributes() }
+  }
+
+  private func setTitleAttributes() {
+    let style = NSMutableParagraphStyle()
+    style.alignment = .center
+    attributedTitle = NSAttributedString(
+      string: title,
+      attributes: [
+        .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+        .foregroundColor: EmberColor.ember400,
+        .paragraphStyle: style,
+      ])
+  }
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let hoverArea { removeTrackingArea(hoverArea) }
+    let area = NSTrackingArea(
+      rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+      owner: self, userInfo: nil)
+    addTrackingArea(area)
+    hoverArea = area
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    super.mouseEntered(with: event)
+    guard isEnabled, !cursorPushed else { return }
+    NSCursor.pointingHand.push()
+    cursorPushed = true
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    super.mouseExited(with: event)
+    guard cursorPushed else { return }
+    NSCursor.pop()
+    cursorPushed = false
+  }
+
+  /// Never strand a pushed cursor if the row hides mid-hover.
+  override func viewDidHide() {
+    super.viewDidHide()
+    if cursorPushed {
+      NSCursor.pop()
+      cursorPushed = false
     }
   }
 }

@@ -26,6 +26,9 @@ let package = Package(
     ),
     .executableTarget(name: "EmberCoreChecks", dependencies: ["EmberCore"]),
     .testTarget(name: "EmberCoreTests", dependencies: ["EmberCore"]),
+    // Drives DisplayCoordinator through injected fakes: the shipped
+    // orchestration is otherwise only reachable by mutating real displays.
+    .testTarget(name: "ProjectEmberTests", dependencies: ["ProjectEmber", "EmberCore"]),
   ],
   swiftLanguageModes: [.v6]
 )

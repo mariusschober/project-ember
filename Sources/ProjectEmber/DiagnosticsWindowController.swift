@@ -131,7 +131,27 @@ final class DiagnosticsWindowController: NSWindowController {
   }
 
   @objc private func resetDisplay() {
-    resetHandler()
-    textView.string = textProvider()
+    // Restoring every display mid-evening has no undo, so it asks first
+    // (audit M13). The alert is a sheet on the diagnostics window.
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Restore all displays to their saved state?"
+    alert.informativeText =
+      "Every connected display returns to the colours and brightness Ember saved before it changed them. Displays that are not connected stay pending."
+    alert.addButton(withTitle: "Restore Now")
+    alert.addButton(withTitle: "Cancel")
+    alert.buttons.first?.setAccessibilityLabel("Restore all displays now")
+    alert.buttons.last?.setAccessibilityLabel("Cancel restore")
+
+    let performRestore: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+      guard response == .alertFirstButtonReturn, let self else { return }
+      self.resetHandler()
+      self.textView.string = self.textProvider()
+    }
+    if let window {
+      alert.beginSheetModal(for: window, completionHandler: performRestore)
+    } else {
+      performRestore(alert.runModal())
+    }
   }
 }

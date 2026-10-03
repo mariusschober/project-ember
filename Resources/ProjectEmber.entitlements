@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict/>
+<dict>
+    <!-- Hardened Runtime resource access. Apple requires this entitlement for
+         CoreLocation when the app is signed with the Hardened Runtime, which
+         scripts/build-production-release.sh enables with the "runtime" signing
+         option. Without it, the Sun schedule stays silently in "Getting an
+         approximate location…" in the signed build, while the ad-hoc developer
+         build (no Hardened Runtime) appears to work.
+         This is a Hardened Runtime resource-access entitlement, not an App
+         Sandbox one: Project Ember ships as a direct download by owner
+         decision (Backlight Lock loads the private DisplayServices framework),
+         so the App Sandbox and App Store container entitlements must not be
+         added here.
+         Keep this file free of double hyphens other than the delimiters of
+         this comment: AMFI's entitlement parser rejects XML comments that
+         contain them (codesign reports "AMFIUnserializeXML: syntax error")
+         even though plutil -lint accepts the file. -->
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+</dict>
 </plist>

@@ -1,4 +1,5 @@
 import AppKit
+import EmberCore
 
 @MainActor
 final class EmberHeaderView: NSView {
@@ -9,7 +10,6 @@ final class EmberHeaderView: NSView {
   // short-wavelength display output for evening use." — the longer string's
   // uncapped truncating intrinsic width stretched the whole window past 390pt.
   let subtitleLabel = NSTextField(labelWithString: "Reduces short-wavelength light for evening use.")
-  let betaLabel = NSTextField(labelWithString: "BETA") // kept for compatibility, hidden
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -39,10 +39,6 @@ final class EmberHeaderView: NSView {
     textStack.spacing = 1
     textStack.alignment = .leading
 
-    betaLabel.font = NSFont.systemFont(ofSize: 9, weight: .bold)
-    betaLabel.textColor = EmberColor.ember400
-    betaLabel.alphaValue = 0.95
-
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -65,10 +61,6 @@ final class EmberHeaderView: NSView {
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
-
-  func setBetaHidden(_ hidden: Bool) {
-    betaLabel.isHidden = hidden
-  }
 }
 
 @MainActor
@@ -79,8 +71,9 @@ final class EmberFooterBarView: NSView {
   let prefixLabel = NSTextField(labelWithString: "Designed by\u{00A0}")
   let authorButton = NSButton(title: "Marius Schober", target: nil, action: nil)
   let suffixLabel = NSTextField(labelWithString: "\u{00A0}for circadian-aware evenings")
-  // Single badge ("BETA · v0.4.0"): two badges cost ~73pt vs ~66pt.
-  let betaBadge = NSTextField(labelWithString: "BETA · v0.4.0")
+  /// Version chip. Was "BETA · v0.4.0" — a shipping build must not call itself
+  /// beta, and the version comes from the bundle (audit M10).
+  let versionBadge = NSTextField(labelWithString: "")
   private static let authorURL = URL(string: "https://mariusschober.com/")!
 
   override init(frame frameRect: NSRect) {
@@ -111,14 +104,14 @@ final class EmberFooterBarView: NSView {
     authorButton.setAccessibilityHelp("Opens the author's website.")
     authorButton.setAccessibilityRole(.link)
 
-    betaBadge.font = NSFont.systemFont(ofSize: 8.5, weight: .bold)
-    betaBadge.textColor = EmberColor.ember400
-    betaBadge.alphaValue = 0.95
-    betaBadge.wantsLayer = true
-    betaBadge.layer?.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1.0).cgColor
-    betaBadge.layer?.cornerRadius = 6
-    betaBadge.layer?.masksToBounds = true
-    betaBadge.translatesAutoresizingMaskIntoConstraints = false
+    versionBadge.font = NSFont.systemFont(ofSize: 8.5, weight: .bold)
+    versionBadge.textColor = EmberColor.ember400
+    versionBadge.alphaValue = 0.95
+    versionBadge.wantsLayer = true
+    versionBadge.layer?.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1.0).cgColor
+    versionBadge.layer?.cornerRadius = 6
+    versionBadge.layer?.masksToBounds = true
+    versionBadge.translatesAutoresizingMaskIntoConstraints = false
 
     let left = NSStackView(views: [prefixLabel, authorButton, suffixLabel])
     left.orientation = .horizontal
@@ -127,7 +120,7 @@ final class EmberFooterBarView: NSView {
 
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-    let container = NSStackView(views: [left, spacer, betaBadge])
+    let container = NSStackView(views: [left, spacer, versionBadge])
     container.orientation = .horizontal
     container.alignment = .centerY
     container.spacing = 4
@@ -146,8 +139,20 @@ final class EmberFooterBarView: NSView {
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
 
-  func setText(version: String = AppVersionDisplay.fallback) {
-    betaBadge.stringValue = " BETA · \(version) "
+  func setText(version: String = EmberFooterBarView.bundleVersionText) {
+    versionBadge.stringValue = " \(version) "
+  }
+
+  /// Version text straight from the bundle, falling back to EmberCore's single
+  /// source of truth. Never a literal: a hardcoded "v0.4.0" here silently
+  /// outlived the version bump (and fails scripts/version.sh --check).
+  static var bundleVersionText: String {
+    if let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+      !value.isEmpty
+    {
+      return "v\(value)"
+    }
+    return AppVersion.displayString
   }
 
   private var authorCursorPushed = false
@@ -209,11 +214,7 @@ final class EmberFooterBarView: NSView {
   }
 }
 
-/// Version fallback without importing EmberCore into this UI file's contract.
-private enum AppVersionDisplay {
-  static let fallback = "v0.4.0"
-}
-
+/// Footer actions: Diagnostics and Quit, styled as translucent pills.
 @MainActor
 final class EmberFooterActionsView: NSView {
   let diagnosticsButton = NSButton(title: "Diagnostics", target: nil, action: nil)
@@ -230,9 +231,11 @@ final class EmberFooterActionsView: NSView {
       btn.wantsLayer = true
       btn.layer?.cornerRadius = 15
       btn.layer?.masksToBounds = true
-      btn.layer?.backgroundColor = NSColor(calibratedWhite: 0.16, alpha: 1.0).cgColor
+      btn.layer?.backgroundColor = EmberColor.controlFill.cgColor
       btn.layer?.borderWidth = 1
-      btn.layer?.borderColor = NSColor.white.withAlphaComponent(0.07).cgColor
+      // Footer actions are user-visible controls; give their edge the same
+      // >=3:1 boundary as the other controls (audit M4).
+      btn.layer?.borderColor = EmberColor.borderControl.cgColor
       btn.font = EmberFont.footerAction()
       btn.contentTintColor = color
       if let sym = symbol, let img = NSImage(systemSymbolName: sym, accessibilityDescription: nil) {

@@ -2,19 +2,79 @@ import AppKit
 
 @MainActor
 enum EmberDotIcon {
-  /// Inactive grey dot — calm, 8px on 16 canvas
+  /// Inactive dot — calm, 8 px on a 16 pt canvas.
+  ///
+  /// Template on purpose: `NSStatusItem` follows the system appearance, and a
+  /// fixed grey measured 3.00:1 on a light menu bar and 4.55:1 on a dark one
+  /// (audit M5). A template image is tinted by the system (black on a light
+  /// bar, white on a dark one), so the dot always contrasts.
   static func inactiveImage() -> NSImage {
-    makeDot(diameter: 8, color: NSColor(calibratedRed: 0.56, green: 0.54, blue: 0.53, alpha: 1.0), glow: false)
+    let image = makeDot(diameter: 8, color: .black, glow: false)
+    image.isTemplate = true
+    return image
   }
 
-  /// Active ember dot — larger 12px + soft glow, matches hero orb / app icon
+  /// Active ember dot — 12 px + soft glow, matches hero orb / app icon.
+  ///
+  /// Deliberately NOT a template: the brand ember is the app's identity in the
+  /// menu bar. 2.93:1 on a light bar is acceptable for the *active* state
+  /// because the size/shape cue and the tooltip carry the same information;
+  /// the states that must be noticed are template-drawn below.
   static func activeImage() -> NSImage {
-    makeDot(diameter: 12, color: EmberColor.ember500, glow: true, glowAlpha: 0.28)
+    let image = makeDot(diameter: 12, color: EmberColor.ember500, glow: true, glowAlpha: 0.28)
+    image.isTemplate = false
+    return image
   }
 
-  /// Degraded — amber dot (attention) slightly larger than inactive, no glow
+  /// Degraded/attention — a warning triangle, not an amber dot.
+  ///
+  /// Two fixes in one: amber #FF9E3D on a light menu bar measured 1.80:1
+  /// (audit M5), and a colour-only difference is invisible to colour-blind
+  /// users. A template warning shape is system-tinted *and* shape-distinct.
   static func degradedImage() -> NSImage {
-    makeDot(diameter: 10, color: EmberColor.warning, glow: false)
+    let image = makeAttentionGlyph()
+    image.isTemplate = true
+    return image
+  }
+
+  /// Exclamation-inside-triangle, 12x11 pt on the 16 pt canvas, drawn as an
+  /// alpha mask: the exclamation is punched out so the bar shows through.
+  private static func makeAttentionGlyph() -> NSImage {
+    let canvas: CGFloat = 16
+    let size = NSSize(width: canvas, height: canvas)
+    let image = NSImage(size: size)
+    image.lockFocus()
+    defer { image.unlockFocus() }
+    guard let ctx = NSGraphicsContext.current?.cgContext else { return image }
+    ctx.setAllowsAntialiasing(true)
+    ctx.setShouldAntialias(true)
+
+    let cx = canvas / 2
+    let cy = canvas / 2 + 0.5
+    let width: CGFloat = 13
+    let height: CGFloat = 11.5
+    // Rounded triangle.
+    let triangle = CGMutablePath()
+    triangle.move(to: CGPoint(x: cx, y: cy + height / 2))
+    triangle.addLine(to: CGPoint(x: cx + width / 2, y: cy - height / 2))
+    triangle.addLine(to: CGPoint(x: cx - width / 2, y: cy - height / 2))
+    triangle.closeSubpath()
+    ctx.addPath(triangle)
+    ctx.setFillColor(NSColor.black.cgColor)
+    ctx.fillPath()
+
+    // Punch the exclamation out of the solid triangle.
+    ctx.setBlendMode(.clear)
+    let barWidth: CGFloat = 1.8
+    let barBottom = cy - height * 0.22
+    let barTop = cy + height * 0.28
+    ctx.fill(CGRect(x: cx - barWidth / 2, y: barBottom, width: barWidth, height: barTop - barBottom))
+    let dotDiameter: CGFloat = 1.9
+    ctx.fillEllipse(
+      in: CGRect(
+        x: cx - dotDiameter / 2, y: barBottom - 3.1, width: dotDiameter, height: dotDiameter))
+    ctx.setBlendMode(.normal)
+    return image
   }
 
   /// Header orb — 28px canvas, 20px orb + glow + highlight, replaces flame
@@ -89,6 +149,17 @@ enum EmberDotIcon {
     ctx.setFillColor(color.cgColor)
     ctx.addEllipse(in: NSRect(x: cx - diameter/2, y: cy - diameter/2, width: diameter, height: diameter))
     ctx.fillPath()
+
+    // Delineating rim for the brand-coloured active dot. Ember on a light menu
+    // bar measures ~2.6:1, below the 3:1 WCAG 1.4.11 asks of a graphical
+    // object; a dark rim gives it a legible edge in Light Mode and disappears
+    // into a dark bar, where the ember core already contrasts 6.7:1.
+    if glow {
+      ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.9).cgColor)
+      ctx.setLineWidth(1.5)
+      let rim = diameter + 1.5
+      ctx.strokeEllipse(in: NSRect(x: cx - rim/2, y: cy - rim/2, width: rim, height: rim))
+    }
 
     // Inner lighter center for ember active (radial)
     if glow {

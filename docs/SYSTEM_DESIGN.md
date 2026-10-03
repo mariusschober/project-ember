@@ -1,9 +1,12 @@
-# System design (0.4.0)
+# System design (0.5.0)
 
 ## Version truth
 
-`EmberCore.AppVersion` (marketing 0.4.0, build 4, schema 2) is the single
+`EmberCore.AppVersion` (marketing 0.5.0, build 5, schema 2) is the single
 source of truth. Info.plist, artifact names, and fallback UI derive from it.
+The build scripts read it through `scripts/version.sh`, stamp the assembled
+Info.plist from it, and `scripts/version.sh --check` (run by CI) fails if a
+plist, a bundle, or a script pins a different number.
 
 ## Topology reconciliation (replaces full restore/reapply)
 

@@ -1,0 +1,148 @@
+name: Release
+
+# Release pipeline: build both configurations, run the test suites, lint the
+# metadata, assemble the app bundle, and run the codesign / spctl / stapler
+# assertions from scripts/verify-release-artifacts.sh.
+#
+# Without signing secrets the job is green: it builds the local ad-hoc beta
+# (which gates its own bundle and DMG with --expect adhoc) and then proves the
+# *release* gate rejects that ad-hoc bundle, because a gate that accepts
+# anything is worse than no gate at all.
+#
+# With the secrets below present it imports a Developer ID identity and a
+# notarization key, runs scripts/build-production-release.sh — whose gates must
+# accept the signed, notarized, stapled artifact — and uploads the DMG with its
+# SHA-256. Never commit any of these values.
+#
+#   DEVELOPER_ID_P12_BASE64    base64 of the Developer ID Application .p12
+#   DEVELOPER_ID_P12_PASSWORD  password for that .p12
+#   DEVELOPER_ID_IDENTITY      "Developer ID Application: Name (TEAMID)"
+#   NOTARY_API_KEY_P8_BASE64   base64 of the App Store Connect API key (.p8)
+#   NOTARY_API_KEY_ID          App Store Connect API key id
+#   NOTARY_API_ISSUER_ID       App Store Connect API issuer id
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          if [[ -d /Applications/Xcode.app ]]; then
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcrun --show-sdk-path
+      - name: Version agreement (AppVersion.swift is the only source)
+        run: scripts/version.sh --check
+      - name: Debug build
+        run: swift build --disable-sandbox
+      - name: Release build
+        run: swift build --disable-sandbox -c release
+      - name: Unit tests
+        run: swift test --disable-sandbox
+      - name: Core checks
+        run: ./.build/release/EmberCoreChecks
+      - name: Validate plists, privacy manifest and entitlements
+        run: |
+          /usr/bin/plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy Resources/ProjectEmber.entitlements
+          /usr/bin/plutil -p Resources/Info.plist
+      - name: Shell script syntax
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "${script}"
+          done
+
+  release-artifacts:
+    needs: build-test
+    runs-on: macos-15
+    env:
+      NOTARY_PROFILE: ember-ci-notary
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          if [[ -d /Applications/Xcode.app ]]; then
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcrun --show-sdk-path
+
+      - name: Local beta build and both gate directions (no credentials)
+        if: ${{ secrets.DEVELOPER_ID_P12_BASE64 == '' || secrets.NOTARY_API_KEY_P8_BASE64 == '' }}
+        run: |
+          set -euo pipefail
+          scripts/build-local-beta.sh
+          VERSION="$(scripts/version.sh --marketing)"
+          APP="${GITHUB_WORKSPACE}/../outputs/Project Ember.app"
+          DMG="${GITHUB_WORKSPACE}/../outputs/Project-Ember-${VERSION}-local-beta.dmg"
+          if scripts/verify-release-artifacts.sh --expect release --app "${APP}" --dmg "${DMG}"; then
+            echo "::error::the release gate accepted an ad-hoc signed bundle"
+            exit 1
+          fi
+          echo "OK: the release gate rejects the ad-hoc bundle, as required without signing credentials."
+
+      - name: Import Developer ID identity
+        if: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' && secrets.NOTARY_API_KEY_P8_BASE64 != '' }}
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="${RUNNER_TEMP}/ember-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(/usr/bin/openssl rand -hex 24)"
+          printf '%s' "${P12_BASE64}" | /usr/bin/base64 -D > "${RUNNER_TEMP}/identity.p12"
+          /usr/bin/security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          /usr/bin/security set-keychain-settings -lut 3600 "${KEYCHAIN}"
+          /usr/bin/security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          /usr/bin/security import "${RUNNER_TEMP}/identity.p12" -k "${KEYCHAIN}" \
+            -P "${P12_PASSWORD}" -T /usr/bin/codesign
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" >/dev/null
+          /usr/bin/security list-keychains -d user -s "${KEYCHAIN}" \
+            $(/usr/bin/security list-keychains -d user | /usr/bin/tr -d '"')
+          /usr/bin/security find-identity -v -p codesigning "${KEYCHAIN}"
+          rm -f "${RUNNER_TEMP}/identity.p12"
+
+      - name: Store notarization credentials
+        if: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' && secrets.NOTARY_API_KEY_P8_BASE64 != '' }}
+        env:
+          KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${KEY_P8_BASE64}" | /usr/bin/base64 -D > "${RUNNER_TEMP}/notary-key.p8"
+          xcrun notarytool store-credentials "${NOTARY_PROFILE}" \
+            --key "${RUNNER_TEMP}/notary-key.p8" --key-id "${KEY_ID}" --issuer "${ISSUER_ID}"
+          rm -f "${RUNNER_TEMP}/notary-key.p8"
+
+      - name: Developer ID build, notarize, staple and gate
+        if: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' && secrets.NOTARY_API_KEY_P8_BASE64 != '' }}
+        env:
+          DEVELOPER_ID: ${{ secrets.DEVELOPER_ID_IDENTITY }}
+        run: scripts/build-production-release.sh
+
+      - name: Collect release artifacts
+        if: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' && secrets.NOTARY_API_KEY_P8_BASE64 != '' }}
+        run: |
+          set -euo pipefail
+          VERSION="$(scripts/version.sh --marketing)"
+          mkdir -p dist
+          cp "${GITHUB_WORKSPACE}/../outputs/Project-Ember-${VERSION}.dmg" dist/
+          cp "${GITHUB_WORKSPACE}/../outputs/Project-Ember-${VERSION}.sha256" dist/
+          shasum -a 256 dist/
+
+      - name: Upload release artifacts
+        if: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' && secrets.NOTARY_API_KEY_P8_BASE64 != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Project-Ember-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error

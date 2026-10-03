@@ -1,4 +1,4 @@
-# Verification plan (0.4.0)
+# Verification plan (0.5.0)
 
 ## Deterministic tests (`swift test`, no hardware mutation)
 
@@ -28,21 +28,37 @@
 
 `ProjectEmber --system-probe` enumerates active de-duplicated displays: ID,
 UUID, built-in, gamma capacity/readability, hardware capability. No writes.
+This is the only test mode in the shipped release binary.
 
-## Reversible system checks (explicit test Mac only, never unattended CI)
+## Reversible system checks (DEBUG build only, explicit test Mac, never unattended CI)
 
-`--system-self-test`, `--lifecycle-self-test`,
-`--prepare-crash-recovery-test` + `--recover-only` as in prior releases.
-CI runs only fakes.
+The destructive modes — `--system-self-test`, `--lifecycle-self-test`,
+`--prepare-crash-recovery-test` + `--recover-only` — write real gamma and
+backlight state and the production recovery journal, so they are compiled out
+of release builds (audit REL-1). Build the debug binary first:
 
-Executed 2026-09-03 (MacBook Pro M1 Pro, macOS 26.6.2, built-in Liquid Retina
-XDR + Dell S2419H): probe pass (2/2 compatible, 1024 samples, backlight on
-built-in only); system self-test pass (apply/restore, Pure Red, Backlight
-Lock, auto-brightness restore, journal cleared); lifecycle pass (live
-updates, guard, reconfig, sleep/wake/termination); crash prepare + recover
-pass (startup recovery verified, journal cleared).
+```bash
+swift build --disable-sandbox
+./.build/debug/ProjectEmber --system-self-test
+./.build/debug/ProjectEmber --lifecycle-self-test          # waits one full
+                                                           #   EmberTiming.backlightGuardInterval
+./.build/debug/ProjectEmber --prepare-crash-recovery-test
+./.build/debug/ProjectEmber --recover-only
+```
 
-## Manual hardware acceptance matrix (required for 1.0, not claimed for 0.4.0)
+The release binary answers any of those flags with one line on stderr and exit
+64. CI runs only fakes.
+
+Recorded run (2026-09-03, **0.4.0**, MacBook Pro M1 Pro, macOS 26.6.2,
+built-in Liquid Retina XDR + Dell S2419H): probe pass (2/2 compatible, 1024
+samples, backlight on built-in only); system self-test pass (apply/restore,
+Pure Red, Backlight Lock, auto-brightness restore, journal cleared); lifecycle
+pass (live updates, guard, reconfig, sleep/wake/termination); crash prepare +
+recover pass (startup recovery verified, journal cleared). 0.5.0 changes the
+backlight guard interval and the coordinator's timer scheduling, so these
+hardware checks must be re-run on a debug 0.5.0 build before 1.0.
+
+## Manual hardware acceptance matrix (required for 1.0, not claimed for 0.5.0)
 
 Record Mac model, macOS version, connection type, display make/model,
 HDR/True Tone/Night Shift state, and result for each:
@@ -71,10 +87,15 @@ leave no stale highlight; artifacts signed/notarized/stapled with checksums.
 
 ## Release checks
 
-- `swift test` and `EmberCoreChecks` pass
+- `swift test` and `EmberCoreChecks` pass (tests run in the release tree)
+- `scripts/version.sh --check` — AppVersion.swift, Info.plist, the assembled
+  bundle and the scripts all agree
 - Read-only probe reports current displays
-- arm64 Mach-O, macOS 14 minimum, Info.plist 0.4.0 + copyright
+- arm64 Mach-O, macOS 14 minimum, Info.plist 0.5.0 + copyright
 - Privacy manifest valid, no collected/tracking data
+- Entitlements contain exactly the Hardened Runtime location entitlement
 - Local ad-hoc signature verifies; production path signs/notarizes/staples
 - DMG mounts with app + Applications shortcut; fresh launch leaves filter and
   Sun schedule off
+- Hard gates: `scripts/verify-release-artifacts.sh --expect release` accepts the
+  signed app and DMG (and rejects an ad-hoc bundle)

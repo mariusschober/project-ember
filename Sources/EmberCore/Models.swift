@@ -338,6 +338,31 @@ public struct RecoveryRecord: Codable, Equatable, Sendable {
     try values.encode(displays, forKey: .displays)
     try values.encode(intendedSettings, forKey: .intendedSettings)
   }
+
+  /// Structural validation applied after decoding (see
+  /// `RecoveryJournal.loadOutcome`). Invalid records are treated as corrupt, so
+  /// they take the quarantine/backup path instead of being replayed onto a
+  /// panel. Returns a human-readable reason, or nil when the record is usable.
+  public func validationFailure() -> String? {
+    guard schemaVersion >= 1 else {
+      return "Recovery journal declares schema v\(schemaVersion)"
+    }
+    guard schemaVersion <= AppVersion.maxSupportedSchemaVersion else {
+      return "Unsupported recovery schema v\(schemaVersion)"
+    }
+    guard !displays.isEmpty else {
+      return "Recovery journal contains no displays"
+    }
+    for entry in displays {
+      guard entry.display.gammaTable.isValid else {
+        return "Recovery baseline for display \(entry.display.displayID) has an invalid colour table"
+      }
+      guard entry.display.gammaTable.isPlausibleBaseline else {
+        return "Recovery baseline for display \(entry.display.displayID) is a constant table"
+      }
+    }
+    return nil
+  }
 }
 
 public enum EmberError: LocalizedError, Equatable, Sendable {

@@ -66,11 +66,11 @@ final class DisplayCoordinator: NSObject {
   var onSnapshot: ((EmberSnapshot) -> Void)?
   let diagnostics: DiagnosticLog
 
-  private let gammaController: GammaDisplayController
-  private let backlightController: DisplayServicesBacklightController
-  private let launchAtLoginController: LaunchAtLoginController
-  private let settingsStore: SettingsStore
-  private let recoveryJournal: RecoveryJournal
+  private let gammaController: any DisplayControlling
+  private let backlightController: any BacklightControlling
+  private let launchAtLoginController: any LaunchAtLoginControlling
+  private let settingsStore: any SettingsPersisting
+  private let recoveryJournal: any JournalStore
   private let solarController: SolarScheduleController
   private let clock: () -> Date
 
@@ -92,11 +92,15 @@ final class DisplayCoordinator: NSObject {
   private var consecutiveBacklightFailures = 0
   private var lastError: String?
   private var attentionOverride: AttentionState?
+  /// Journal-integrity warnings outlive a toggle: nothing the user can do to
+  /// the filter repairs an unreadable recovery record, so `setFilterEnabled`
+  /// must not clear one. Explicit Retry/Reset are the only ways out.
+  private var attentionIsSticky = false
   private var availableDisplayCount = 0
   private var compatibleDisplayCount = 0
   private var unsupportedDisplayCount = 0
   private var pendingRestoreCount = 0
-  private var backlightCapability = DisplayServicesBacklightController.Capability(
+  private var backlightCapability = BacklightCapability(
     brightnessControl: false,
     ambientLightControl: false
   )
@@ -107,8 +111,16 @@ final class DisplayCoordinator: NSObject {
   private var reconcileTask: Task<Void, Never>?
   private var postVerifyTasks: [Task<Void, Never>] = []
   private var lastTopologySnapshot: DisplayTopologySnapshot?
-  // Repeated-override detection: identity key -> reset timestamps (bounded 60s window).
-  private var overrideHistory: [String: [Date]] = [:]
+  // Repeated-override detection. The policy lives in EmberCore so the rule the
+  // tests cover is the rule the app runs.
+  private var overrideTracker = OverrideTracker(
+    window: EmberTiming.overrideHistoryWindow,
+    threshold: EmberTiming.overrideStrikeLimit
+  )
+  // Bounded back-off after repeated external overrides. The pause is real, and
+  // the attention state that explains it is cleared when it ends.
+  private var overridePauseUntil: Date?
+  private var overrideAttentionActive = false
   private var isHandlingEvent = false
 
   private var appVersionString: String {
@@ -117,11 +129,11 @@ final class DisplayCoordinator: NSObject {
   }
 
   init(
-    gammaController: GammaDisplayController = GammaDisplayController(),
-    backlightController: DisplayServicesBacklightController = DisplayServicesBacklightController(),
-    launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController(),
-    settingsStore: SettingsStore = SettingsStore(),
-    recoveryJournal: RecoveryJournal = RecoveryJournal(
+    gammaController: any DisplayControlling = GammaDisplayController(),
+    backlightController: any BacklightControlling = DisplayServicesBacklightController(),
+    launchAtLoginController: any LaunchAtLoginControlling = LaunchAtLoginController(),
+    settingsStore: any SettingsPersisting = SettingsStore(),
+    recoveryJournal: any JournalStore = RecoveryJournal(
       fileURL: DisplayCoordinator.defaultRecoveryURL()
     ),
     solarController: SolarScheduleController = SolarScheduleController(),
@@ -188,7 +200,9 @@ final class DisplayCoordinator: NSObject {
     } else {
       publishSnapshot()
     }
-    startHealthCheck()
+    // The health check is started by the activation path, not here: with Ember
+    // off it has nothing to verify and would wake the process 120x/hour forever
+    // only to return at the `filterEnabled` guard.
   }
 
   func currentSnapshot() -> EmberSnapshot {
@@ -256,7 +270,10 @@ final class DisplayCoordinator: NSObject {
 
   func setFilterEnabled(_ enabled: Bool) {
     lastError = nil
-    attentionOverride = nil
+    // A journal-integrity warning is not repaired by toggling Ember, so it
+    // survives this call (0.4.0 wiped it here, one line before the same bug in
+    // restoreDisplay).
+    if !attentionIsSticky { attentionOverride = nil }
     if settings.sunScheduleEnabled, let event = solarSnapshot.schedule?.nextEvent {
       settings.automationOverride = AutomationOverride(
         filterEnabled: enabled,
@@ -270,13 +287,22 @@ final class DisplayCoordinator: NSObject {
   }
 
   /// Quick-toggle entry point for menu-bar primary click. Coalesces while busy.
+  /// Right-click never reaches here: AppDelegate routes it straight to the panel.
   func handlePrimaryClick() -> MenuBarClickResult {
-    if isBusyState() { return .ignoredBusy }
-    switch settings.menuBarPrimaryAction {
+    let route = MenuBarRouting.route(
+      action: settings.menuBarPrimaryAction,
+      isBusy: isBusyState(),
+      isRightClick: false,
+      isObservedActive: currentSnapshot().isObservedActive,
+      filterEnabled: settings.filterEnabled
+    )
+    switch route {
+    case .ignoredBusy:
+      return .ignoredBusy
     case .openControls:
       return .openedControls
-    case .toggleEmber:
-      let turningOn = !settings.filterEnabled || !currentSnapshot().isObservedActive
+    case .toggleOn, .toggleOff:
+      let turningOn = route == .toggleOn
       // Reuse sun-override semantics.
       setFilterEnabled(turningOn)
       return turningOn ? .toggledOn : .toggledOff
@@ -493,9 +519,19 @@ final class DisplayCoordinator: NSObject {
     stopBacklightGuard()
     let entries = loadJournalEntriesForMutation()
     var report = restoreEntriesVerified(entries)
-    if report.hasFailure {
+    // An empty work list is not proof that the display is already correct: it
+    // usually means the recovery record is gone (or was quarantined). 0.4.0
+    // reported "Manual display reset completed" in that case without touching a
+    // display and without attempting the system fallback, which is the one path
+    // that could pair a still-warm screen with a green checkmark.
+    let hadNoRecord = entries.isEmpty
+    if report.hasFailure || hadNoRecord {
       gammaController.forceColorSyncRestore()
-      diagnostics.append("ColorSync fallback applied after exact reset failure", level: "WARN")
+      diagnostics.append(
+        hadNoRecord
+          ? "No recovery record was available; attempted a system colour reset instead"
+          : "ColorSync fallback applied after exact reset failure",
+        level: hadNoRecord ? "WARN" : "INFO")
       // Remove only entries actually matching saved baselines after fallback.
       var stillRemaining: [DisplayRecoveryEntry] = []
       for entry in report.remaining {
@@ -507,11 +543,15 @@ final class DisplayCoordinator: NSObject {
     controlledIdentities.removeAll()
     verifiedIdentities.removeAll()
     failedIdentities.removeAll()
+    attentionIsSticky = false
     settings.filterEnabled = false
     // Explicit emergency reset clears Backlight Lock preference (stated in UI).
     settings.backlightLockEnabled = false
     backlightEngagement = .disengaged
     backlightIdentity = nil
+    overridePauseUntil = nil
+    overrideAttentionActive = false
+    overrideTracker.reset()
     recoveryEntries = report.remaining
     pendingRestoreCount = report.remaining.count
     saveSettingsImmediately()
@@ -520,7 +560,10 @@ final class DisplayCoordinator: NSObject {
       machine = DisplayStateMachine()
       lastError = nil
       attentionOverride = nil
-      diagnostics.append("Manual display reset completed")
+      diagnostics.append(
+        hadNoRecord
+          ? "Manual reset finished with no saved baseline; a system colour reset was attempted"
+          : "Manual display reset completed")
     } else {
       try? rewriteRecoveryRecord()
       let message = Self.pendingRestoreMessage(count: report.remaining.count)
@@ -540,8 +583,12 @@ final class DisplayCoordinator: NSObject {
 
   func retryNow() {
     attentionOverride = nil
+    attentionIsSticky = false
     lastError = nil
-    overrideHistory.removeAll()
+    overrideTracker.reset()
+    // An explicit retry always ends a bounded override pause.
+    overridePauseUntil = nil
+    overrideAttentionActive = false
     if settings.filterEnabled {
       topologyGeneration += 1
       let generation = topologyGeneration
@@ -562,7 +609,10 @@ final class DisplayCoordinator: NSObject {
     if pendingSettingsDirty {
       pendingSettingsDirty = false
       saveSettingsImmediately()
-      if recoveryJournal.exists { try? rewriteRecoveryRecord() }
+      // Deliberately no journal rewrite here. Baselines only change when a
+      // display is captured or restored, and `intendedSettings` is never
+      // replayed during recovery, so rewriting a ~33 KB record on every 150 ms
+      // of slider movement was pure I/O amplification on the main thread.
     }
   }
 
@@ -622,6 +672,13 @@ final class DisplayCoordinator: NSObject {
       let ambiguous = (try? gammaController.ambiguousIdentityKeys()) ?? []
 
       var freshEntries: [DisplayRecoveryEntry] = []
+      // Displays whose prior baseline is still pending: the display is back but
+      // its restore could not be verified. Recapturing would replace the true
+      // original with whatever the panel shows now, so the saved baseline is
+      // reused instead. Before 0.5.0 these displays were skipped outright, and
+      // if every display was skipped activation threw and forced the preference
+      // off — a menu-bar toggle that could never be turned on again.
+      var reusedEntries: [DisplayRecoveryEntry] = []
       for target in targets where target.supportsGamma {
         let key = DisplayTopologySnapshot.key(for: target.identity)
         if ambiguous.contains(key) {
@@ -631,9 +688,10 @@ final class DisplayCoordinator: NSObject {
           )
           continue
         }
-        if pendingEntries.contains(where: { $0.identity.matches(target.identity) }) {
+        if let pending = pendingEntries.first(where: { $0.identity.matches(target.identity) }) {
+          reusedEntries.append(pending)
           diagnostics.append(
-            "Skipped display \(target.displayID) because exact prior recovery is still pending",
+            "Display \(target.displayID) reuses its saved baseline; the earlier restore is still unverified",
             level: "WARN"
           )
           continue
@@ -651,10 +709,9 @@ final class DisplayCoordinator: NSObject {
           )
         }
       }
-      guard !freshEntries.isEmpty, !pendingEntries.isEmpty || !freshEntries.isEmpty else {
+      guard !freshEntries.isEmpty || !reusedEntries.isEmpty else {
         throw EmberError.noCompatibleDisplay
       }
-      guard !freshEntries.isEmpty else { throw EmberError.noCompatibleDisplay }
 
       // Backlight: capture only on verified compatible built-in target, and only
       // when the current value was read successfully (stored in recovery entry).
@@ -724,6 +781,24 @@ final class DisplayCoordinator: NSObject {
           )
         }
       }
+      // Reused baselines are already journaled and must never be rolled back
+      // into a state they were never captured from, so they are applied without
+      // the fresh-entry rollback path.
+      for entry in reusedEntries {
+        do {
+          try gammaController.apply(settings: settings, to: entry.display)
+          successful.insert(entry.identity)
+          verifiedIdentities.insert(entry.identity)
+          diagnostics.append(
+            "Applied the saved baseline for display \(entry.display.displayID)")
+        } catch {
+          failed[entry.identity] = error.localizedDescription
+          diagnostics.append(
+            "Saved-baseline apply failed for display \(entry.display.displayID): \(error.localizedDescription)",
+            level: "ERROR"
+          )
+        }
+      }
       guard !successful.isEmpty else {
         // Keep every unsuccessful entry journaled.
         recoveryEntries = pendingEntries + freshEntries
@@ -736,7 +811,10 @@ final class DisplayCoordinator: NSObject {
       // Retain failed-rollback entries: only drop nothing here; pending + fresh
       // all remain journaled until verified restoration.
       recoveryEntries = pendingEntries + freshEntries
-      pendingRestoreCount = pendingEntries.count
+      // Pending means "journaled but not currently under Ember's control", so a
+      // reused baseline that applied successfully is no longer counted as an
+      // unplugged display.
+      pendingRestoreCount = recoveryEntries.filter { !successful.contains($0.identity) }.count
       try rewriteRecoveryRecord()
 
       if settings.backlightLockEnabled, backlightIdentity != nil {
@@ -769,6 +847,7 @@ final class DisplayCoordinator: NSObject {
       backlightEngagement = .disengaged
       saveSettingsImmediately()
       lastError = error.localizedDescription
+      attentionIsSticky = false
       attentionOverride = AttentionState(
         severity: .error,
         title: "Needs attention",
@@ -792,6 +871,7 @@ final class DisplayCoordinator: NSObject {
     }
     publishSnapshot()
     stopBacklightGuard()
+    stopHealthCheck()
     let entries = loadJournalEntriesForMutation()
     let report = restoreEntriesVerified(entries)
     controlledIdentities.removeAll()
@@ -808,9 +888,16 @@ final class DisplayCoordinator: NSObject {
     if report.remaining.isEmpty {
       _ = machine.transition(.restoreSucceeded)
       try? recoveryJournal.clear()
-      lastError = nil
-      attentionOverride = nil
-      diagnostics.append("Saved state restored for every available display")
+      // Only a pass that actually restored something proves the display is
+      // healthy. With an empty work list the previous warning stands: an
+      // unreadable journal must not be silently forgotten by a toggle or quit.
+      if report.outcomes.isEmpty {
+        diagnostics.append("Nothing to restore; no journaled baseline was outstanding")
+      } else {
+        lastError = nil
+        attentionOverride = nil
+        diagnostics.append("Saved state restored for every available display")
+      }
     } else {
       let message = Self.pendingRestoreMessage(count: report.remaining.count)
       _ = machine.transition(.restoreFailed(message))
@@ -978,7 +1065,15 @@ final class DisplayCoordinator: NSObject {
       if report.remaining.isEmpty {
         try? recoveryJournal.clear()
         if machine.state == .reconciling { _ = machine.transition(.reconciliationSucceeded) }
-        lastError = nil
+        // Nothing is controlled or verified while Ember is off.
+        controlledIdentities.removeAll()
+        verifiedIdentities.removeAll()
+        // An empty work list is not evidence of a healthy state: only clear a
+        // standing warning when this pass actually restored something.
+        if !report.outcomes.isEmpty {
+          lastError = nil
+          attentionOverride = nil
+        }
       } else {
         try? rewriteRecoveryRecord()
       }
@@ -990,17 +1085,20 @@ final class DisplayCoordinator: NSObject {
     if machine.state == .active || machine.state == .activating || machine.state == .reconciling {
       if machine.state != .reconciling { _ = machine.transition(.displayChanged) }
     }
-    var newVerified = verifiedIdentities
-    var newFailed = failedIdentities
-    var addedEntries: [DisplayRecoveryEntry] = []
-    var restoredAsPending: [DisplayRecoveryEntry] = []
-    // Offline journaled → retain pending.
     let onlineKeys = Set(snapshot.entries.map { DisplayTopologySnapshot.key(for: $0.identity) })
-    for entry in recoveryEntries {
-      let key = DisplayTopologySnapshot.key(for: entry.identity)
-      if onlineKeys.contains(key) == false {
-        restoredAsPending.append(entry)
-      }
+    // Observed truth is scoped to what is online *now*. 0.4.0 carried these sets
+    // forward, so unplugging a display left it "verified": the panel kept
+    // reporting "Active on 1 display" with nothing connected, and the health
+    // check then read the missing table as an external override (which raised a
+    // false accusation against another display service).
+    var newVerified = verifiedIdentities.filter {
+      onlineKeys.contains(DisplayTopologySnapshot.key(for: $0))
+    }
+    var newFailed = failedIdentities.filter {
+      onlineKeys.contains(DisplayTopologySnapshot.key(for: $0.key))
+    }
+    var newControlled = controlledIdentities.filter {
+      onlineKeys.contains(DisplayTopologySnapshot.key(for: $0))
     }
     for action in plan.actions {
       guard generation == topologyGeneration, !Task.isCancelled else { return }
@@ -1020,12 +1118,12 @@ final class DisplayCoordinator: NSObject {
               try gammaController.apply(settings: settings, to: entry.display)
               newVerified.insert(identity)
               newFailed.removeValue(forKey: identity)
-              recordOverrideIfReset(identity: identity, repaired: true)
+              recordOverrideIfReset(identity: identity)
               diagnostics.append("Reapplied transform derived from saved baseline for display \(entry.display.displayID)")
             } catch {
               newVerified.remove(identity)
               newFailed[identity] = error.localizedDescription
-              recordOverrideIfReset(identity: identity, repaired: false)
+              recordOverrideIfReset(identity: identity)
               diagnostics.append(
                 "Reapply failed for display \(entry.display.displayID): \(error.localizedDescription)",
                 level: "ERROR"
@@ -1050,9 +1148,8 @@ final class DisplayCoordinator: NSObject {
           try rewriteRecoveryRecord()
           do {
             try gammaController.apply(settings: settings, to: baseline)
-            controlledIdentities.insert(live.identity)
+            newControlled.insert(live.identity)
             newVerified.insert(live.identity)
-            addedEntries.append(newEntry)
             diagnostics.append("Journaled then applied new display \(live.displayID) before mutation")
           } catch {
             // Apply failed: restore captured baseline; retain entry if rollback unproven.
@@ -1077,7 +1174,7 @@ final class DisplayCoordinator: NSObject {
         if let entry = recoveryEntries.first(where: { $0.identity.matches(identity) }) {
           do {
             try gammaController.apply(settings: settings, to: entry.display)
-            controlledIdentities.insert(entry.identity)
+            newControlled.insert(entry.identity)
             newVerified.insert(entry.identity)
             newFailed.removeValue(forKey: entry.identity)
             diagnostics.append("Applied pending baseline for reconnected display \(entry.display.displayID)")
@@ -1102,14 +1199,11 @@ final class DisplayCoordinator: NSObject {
     guard generation == topologyGeneration, !Task.isCancelled else { return }
     verifiedIdentities = newVerified
     failedIdentities = newFailed
-    // Update pending count from offline journaled.
-    let journaledKeys = Set(recoveryEntries.map { DisplayTopologySnapshot.key(for: $0.identity) })
-    _ = journaledKeys
+    controlledIdentities = newControlled
+    // Pending = journaled baselines whose display is not online right now.
     pendingRestoreCount = recoveryEntries.filter { entry in
       !onlineKeys.contains(DisplayTopologySnapshot.key(for: entry.identity))
     }.count
-    _ = addedEntries
-    _ = restoredAsPending
     // Backlight: retry engagement during reconciliation when preference set but
     // target was temporarily unavailable.
     if settings.backlightLockEnabled, backlightEngagement != .engaged {
@@ -1122,6 +1216,7 @@ final class DisplayCoordinator: NSObject {
       let message = failedIdentities.values.first ?? "No verified display after reconciliation."
       _ = machine.transition(.reconciliationFailed(message))
       lastError = message
+      attentionIsSticky = false
       attentionOverride = AttentionState(
         severity: .error, title: "Needs attention", message: message,
         recoveryActions: ["Retry", "Reset"])
@@ -1168,11 +1263,23 @@ final class DisplayCoordinator: NSObject {
     guard generation == topologyGeneration, !Task.isCancelled else { return }
     guard settings.filterEnabled else { return }
     guard machine.state == .active || machine.state == .reconciling else { return }
+    // Bounded back-off: while paused we deliberately do not re-apply, because
+    // re-applying is exactly what we are losing to another display service.
+    if let until = overridePauseUntil, until > clock() { return }
+    endOverridePauseIfExpired()
     var repaired = 0
     for entry in recoveryEntries where controlledIdentities.contains(entry.identity)
       || verifiedIdentities.contains(entry.identity)
     {
       guard generation == topologyGeneration, !Task.isCancelled else { return }
+      // A display that is no longer controllable is not an external override.
+      // Without this check, unplugging a monitor made every verification pass
+      // fail to resolve its target, which counted as a strike and produced a
+      // false "another display service keeps replacing Ember's colour table"
+      // accusation ~30 s later (and the claimed pause never existed).
+      guard (try? gammaController.target(matching: entry.identity)) ?? nil != nil else {
+        continue
+      }
       if gammaController.isTransformInstalled(settings: settings, baseline: entry.display) {
         continue
       }
@@ -1182,9 +1289,9 @@ final class DisplayCoordinator: NSObject {
       do {
         try gammaController.apply(settings: settings, to: entry.display)
         repaired += 1
-        recordOverrideIfReset(identity: entry.identity, repaired: true)
+        recordOverrideIfReset(identity: entry.identity)
       } catch {
-        recordOverrideIfReset(identity: entry.identity, repaired: false)
+        recordOverrideIfReset(identity: entry.identity)
         diagnostics.append(
           "Verification reapply failed: \(error.localizedDescription)", level: "ERROR")
       }
@@ -1202,33 +1309,55 @@ final class DisplayCoordinator: NSObject {
     publishSnapshot()
   }
 
-  private func recordOverrideIfReset(identity: DisplayIdentity, repaired: Bool) {
+  private func recordOverrideIfReset(identity: DisplayIdentity) {
     let key = DisplayTopologySnapshot.key(for: identity)
-    var history = overrideHistory[key] ?? []
-    history.append(clock())
-    // Keep 60s window.
-    history = history.filter { clock().timeIntervalSince($0) < 60 }
-    overrideHistory[key] = history
-    if history.count >= 3 {
-      let message =
-        "Another display service is repeatedly replacing Ember’s color table on \(history.count) occasions in 60s. Ember paused automatic reapplication."
-      lastError = message
-      attentionOverride = AttentionState(
-        severity: .error, title: "Needs attention", message: message,
-        recoveryActions: ["Retry", "Reset"])
-      diagnostics.append("Repeated external override on \(key): entering degraded attention state", level: "ERROR")
-      _ = repaired
-      publishSnapshot()
+    guard overrideTracker.recordReset(key: key, at: clock()) else { return }
+    let strikes = overrideTracker.count(key: key, at: clock())
+
+    // 0.4.0 told the user "Ember paused automatic reapplication" while the
+    // health timer kept re-applying. Back the promise with a real, *bounded*
+    // pause: stop fighting, say so truthfully, and resume on its own. Clearing
+    // the strike history makes the next cycle need a fresh run of overrides, so
+    // a single noisy event cannot disable verification indefinitely.
+    // A fresh window after tripping, so one noisy event cannot disable
+    // verification indefinitely.
+    overrideTracker.reset()
+    overridePauseUntil = clock().addingTimeInterval(EmberTiming.overridePauseDuration)
+    overrideAttentionActive = true
+    attentionIsSticky = false
+    let minutes = Int(EmberTiming.overridePauseDuration / 60)
+    let message =
+      "Another display service keeps replacing Ember’s color table (\(strikes) times in \(Int(EmberTiming.overrideHistoryWindow))s). Ember paused automatic reapplication for \(minutes) minutes so it stops fighting; Retry resumes immediately."
+    lastError = message
+    attentionOverride = AttentionState(
+      severity: .error, title: "Needs attention", message: message,
+      recoveryActions: ["Retry", "Reset"])
+    diagnostics.append(
+      "Repeated external override on \(key): pausing reapplication until \(overridePauseUntil?.formatted() ?? "later")",
+      level: "ERROR")
+    publishSnapshot()
+  }
+
+  /// True when the current attention state came from the bounded override
+  /// pause, so it can be cleared when the pause ends rather than lingering.
+  private func endOverridePauseIfExpired() {
+    guard let until = overridePauseUntil, until <= clock() else { return }
+    overridePauseUntil = nil
+    if overrideAttentionActive {
+      overrideAttentionActive = false
+      lastError = nil
+      attentionOverride = nil
+      diagnostics.append("Bounded override pause ended; automatic reapplication resumed")
     }
   }
 
   private func startHealthCheck() {
     stopHealthCheck()
-    let timer = Timer(timeInterval: 30.0, repeats: true) { [weak self] _ in
+    let timer = Timer(timeInterval: EmberTiming.healthCheckInterval, repeats: true) { [weak self] _ in
       Task { @MainActor in await self?.runVerificationPass(
         generation: self?.topologyGeneration ?? 0, kind: "health-30s") }
     }
-    timer.tolerance = 5.0
+    timer.tolerance = EmberTiming.healthCheckTolerance
     RunLoop.main.add(timer, forMode: .common)
     healthTimer = timer
   }
@@ -1254,29 +1383,35 @@ final class DisplayCoordinator: NSObject {
   // MARK: - Live transform / settings
 
   private func settingsDidChange(reapply: Bool) {
-    // Debounce UserDefaults + journal rewrites ~150ms; flush on mouse-up,
-    // popover close, sleep, termination, safety transitions.
+    // Persistence is debounced: re-arm on every change so a drag writes once,
+    // 150 ms after the user stops moving.
     pendingSettingsDirty = true
     settingsPersistTimer?.invalidate()
-    let timer = Timer(timeInterval: 0.15, repeats: false) { [weak self] _ in
+    let timer = Timer(timeInterval: EmberTiming.settingsPersistDelay, repeats: false) {
+      [weak self] _ in
       Task { @MainActor in self?.flushPendingSettings() }
     }
-    timer.tolerance = 0.05
+    timer.tolerance = EmberTiming.settingsPersistTolerance
     RunLoop.main.add(timer, forMode: .common)
     settingsPersistTimer = timer
-    if reapply, machine.state == .active {
-      _ = machine.transition(.settingsChanged)
-      pendingTransformTimer?.invalidate()
-      let coalesce = Timer(timeInterval: 0.05, repeats: false) { [weak self] _ in
-        Task { @MainActor in self?.flushPendingTransform() }
-      }
-      coalesce.tolerance = 0.02
-      RunLoop.main.add(coalesce, forMode: .common)
-      pendingTransformTimer = coalesce
+
+    guard reapply, machine.state == .active else {
       publishSnapshot()
-    } else {
-      publishSnapshot()
+      return
     }
+    _ = machine.transition(.settingsChanged)
+    // Throttle, not debounce: schedule only when nothing is already pending, so
+    // a long drag keeps applying ~20x/second instead of freezing the display
+    // until the user pauses. The coalesced flush publishes the snapshot, so a
+    // drag no longer rebuilds the entire panel once per mouse-move.
+    guard pendingTransformTimer == nil else { return }
+    let coalesce = Timer(timeInterval: EmberTiming.transformCoalesceInterval, repeats: false) {
+      [weak self] _ in
+      Task { @MainActor in self?.flushPendingTransform() }
+    }
+    coalesce.tolerance = EmberTiming.transformCoalesceTolerance
+    RunLoop.main.add(coalesce, forMode: .common)
+    pendingTransformTimer = coalesce
   }
 
   private func flushPendingTransform() {
@@ -1308,11 +1443,16 @@ final class DisplayCoordinator: NSObject {
     }
     controlledIdentities.subtract(failed)
     for id in failed { failedIdentities[id] = "Live update failed" }
-    unsupportedDisplayCount += failed.count
+    // Derived from current truth rather than accumulated: 0.4.0 incremented this
+    // on every failed live update and only reset it during a capability probe,
+    // so a drag after unplugging a display reported "Active on 1 of 1 displays;
+    // unsupported displays were left untouched" for a display that was gone.
+    unsupportedDisplayCount = max(0, compatibleDisplayCount - verifiedIdentities.count)
     if controlledIdentities.isEmpty, verifiedIdentities.isEmpty {
       machine = DisplayStateMachine(state: .degraded(EmberError.noCompatibleDisplay.localizedDescription))
       settings.filterEnabled = false
       saveSettingsImmediately()
+      attentionIsSticky = false
       attentionOverride = AttentionState(
         severity: .error, title: "Needs attention",
         message: EmberError.noCompatibleDisplay.localizedDescription,
@@ -1346,16 +1486,21 @@ final class DisplayCoordinator: NSObject {
         message: EmberError.journalUnsupportedSchema(version).localizedDescription)
       return recoveryEntries
     case .corrupt(let reason):
-      // Quarantine, conservative ColorSync reset as last-resort safety, explicit attention.
-      let url = recoveryJournal.quarantineCorruptJournal()
-      gammaController.forceColorSyncRestore()
+      let resolution = resolveUnreadableJournal(reason: reason)
+      if resolution.recoveredFromBackup {
+        recoveryEntries = resolution.entries
+        let message =
+          "The recovery journal was unreadable; Ember restored from the last known good copy."
+        lastError = message
+        attentionOverride = AttentionState(
+          severity: .warning, title: "Recovered with backup", message: message,
+          recoveryActions: ["Export Diagnostics", "Reset"])
+        publishSnapshot()
+        return resolution.entries
+      }
       let message =
-        "Recovery journal is unreadable and was preserved\(url.map { " at \($0.lastPathComponent)" } ?? ""). Exact restoration cannot be claimed. Export diagnostics for support."
-      diagnostics.append("Corrupt journal (\(reason)); quarantined, ColorSync reset attempted", level: "ERROR")
-      lastError = message
-      attentionOverride = AttentionState(
-        severity: .error, title: "Needs attention", message: message,
-        recoveryActions: ["Export Diagnostics", "Reset"])
+        "Recovery journal is unreadable and was preserved\(resolution.quarantinedURL.map { " at \($0.lastPathComponent)" } ?? ""). Exact restoration cannot be claimed. Export diagnostics for support."
+      raiseJournalIntegrityAttention(message)
       publishSnapshot()
       return recoveryEntries
     case .ioFailure(let message):
@@ -1364,11 +1509,49 @@ final class DisplayCoordinator: NSObject {
     }
   }
 
-  private func handleJournalFailure(message: String) {
+  /// What could be salvaged from an unreadable journal.
+  private struct UnreadableJournalResolution {
+    let entries: [DisplayRecoveryEntry]
+    let quarantinedURL: URL?
+    let recoveredFromBackup: Bool
+  }
+
+  /// Resolve a journal that cannot be decoded.
+  ///
+  /// `RecoveryJournal` has always maintained a last-known-good copy beside the
+  /// primary file, but 0.4.0 never read it, so one torn write silently
+  /// downgraded an exact restore into a system colour reset even when a valid
+  /// record was sitting next to it. Prefer the backup; fall back to quarantine
+  /// plus a conservative ColorSync reset only when nothing usable exists, and
+  /// always record which path was taken.
+  private func resolveUnreadableJournal(reason: String) -> UnreadableJournalResolution {
+    if let record = recoveryJournal.recoverCorruptJournalFromBackup() {
+      diagnostics.append(
+        "Corrupt journal (\(reason)); recovered from the last known good journal", level: "WARN")
+      return UnreadableJournalResolution(
+        entries: record.displays, quarantinedURL: nil, recoveredFromBackup: true)
+    }
+    let url = recoveryJournal.quarantineCorruptJournal()
+    gammaController.forceColorSyncRestore()
+    diagnostics.append(
+      "Corrupt journal (\(reason)); quarantined, ColorSync reset attempted", level: "ERROR")
+    return UnreadableJournalResolution(
+      entries: [], quarantinedURL: url, recoveredFromBackup: false)
+  }
+
+  /// Raises the "exact restoration cannot be claimed" attention state. Sticky
+  /// by design: nothing the user can do to the filter repairs an unreadable
+  /// recovery record, so a toggle must not clear it (see `attentionIsSticky`).
+  private func raiseJournalIntegrityAttention(_ message: String) {
+    attentionIsSticky = true
     lastError = message
     attentionOverride = AttentionState(
       severity: .error, title: "Needs attention", message: message,
-      recoveryActions: ["Retry", "Reset"])
+      recoveryActions: ["Export Diagnostics", "Reset"])
+  }
+
+  private func handleJournalFailure(message: String) {
+    raiseJournalIntegrityAttention(message)
     diagnostics.append(message, level: "ERROR")
     publishSnapshot()
   }
@@ -1382,27 +1565,7 @@ final class DisplayCoordinator: NSObject {
       machine = DisplayStateMachine()
       return
     case .loaded(let record):
-      let report = restoreEntriesVerified(record.displays)
-      recoveryEntries = report.remaining
-      pendingRestoreCount = report.remaining.count
-      settings.filterEnabled = false
-      // Preserve Backlight Lock preference? Crash recovery stays off for safety;
-      // keep preference so next manual on re-engages. Hardware already restored.
-      saveSettingsImmediately()
-      if report.remaining.isEmpty {
-        try? recoveryJournal.clear()
-        machine = DisplayStateMachine()
-        lastError = nil
-        attentionOverride = nil
-        diagnostics.append("Crash recovery completed; Ember stayed off for safety")
-      } else {
-        try? rewriteRecoveryRecord()
-        let message = Self.pendingRestoreMessage(count: report.remaining.count)
-        machine = DisplayStateMachine(state: .degraded(message))
-        lastError = message
-        attentionOverride = nil
-        diagnostics.append(message, level: "WARN")
-      }
+      completeStartupRecovery(displays: record.displays, fromBackup: false)
     case .unsupportedFutureSchema(let version):
       machine = DisplayStateMachine(
         state: .degraded(EmberError.journalUnsupportedSchema(version).localizedDescription))
@@ -1412,20 +1575,50 @@ final class DisplayCoordinator: NSObject {
         recoveryActions: ["Export Diagnostics"])
       diagnostics.append(lastError ?? "Recovery failed", level: "ERROR")
     case .corrupt(let reason):
-      let url = recoveryJournal.quarantineCorruptJournal()
-      gammaController.forceColorSyncRestore()
-      machine = DisplayStateMachine(state: .degraded(
-        EmberError.journalCorrupt(reason).localizedDescription))
-      lastError =
-        "Previous display state could not be exactly restored (journal unreadable\(url.map { ", preserved at \($0.lastPathComponent)" } ?? "")). A system color reset was attempted."
-      diagnostics.append(lastError ?? "Recovery failed", level: "ERROR")
-      attentionOverride = AttentionState(
-        severity: .error, title: "Needs attention",
-        message: lastError ?? "", recoveryActions: ["Export Diagnostics", "Reset"])
+      let resolution = resolveUnreadableJournal(reason: reason)
+      guard resolution.recoveredFromBackup else {
+        machine = DisplayStateMachine(
+          state: .degraded(EmberError.journalCorrupt(reason).localizedDescription))
+        raiseJournalIntegrityAttention(
+          "Previous display state could not be exactly restored (journal unreadable\(resolution.quarantinedURL.map { ", preserved at \($0.lastPathComponent)" } ?? "")). A system color reset was attempted.")
+        diagnostics.append(lastError ?? "Recovery failed", level: "ERROR")
+        return
+      }
+      completeStartupRecovery(displays: resolution.entries, fromBackup: true)
     case .ioFailure(let message):
       machine = DisplayStateMachine(state: .degraded(message))
-      lastError = "Previous display state could not be fully restored: \(message)"
+      raiseJournalIntegrityAttention(
+        "Previous display state could not be fully restored: \(message)")
       diagnostics.append(lastError ?? "Recovery failed", level: "ERROR")
+    }
+  }
+
+  /// Shared startup-recovery completion for a decodable record, whether it came
+  /// from the primary journal or the last-known-good copy.
+  private func completeStartupRecovery(displays: [DisplayRecoveryEntry], fromBackup: Bool) {
+    let report = restoreEntriesVerified(displays)
+    recoveryEntries = report.remaining
+    pendingRestoreCount = report.remaining.count
+    settings.filterEnabled = false
+    // Crash recovery stays off for safety, but the Backlight Lock preference is
+    // preserved so a later manual on re-engages it; hardware is already restored.
+    saveSettingsImmediately()
+    if report.remaining.isEmpty {
+      try? recoveryJournal.clear()
+      machine = DisplayStateMachine()
+      lastError = nil
+      attentionOverride = nil
+      diagnostics.append(
+        fromBackup
+          ? "Startup recovery completed from the last known good journal; Ember stayed off for safety"
+          : "Crash recovery completed; Ember stayed off for safety")
+    } else {
+      try? rewriteRecoveryRecord()
+      let message = Self.pendingRestoreMessage(count: report.remaining.count)
+      machine = DisplayStateMachine(state: .degraded(message))
+      lastError = message
+      attentionOverride = nil
+      diagnostics.append(message, level: "WARN")
     }
   }
 
@@ -1441,8 +1634,12 @@ final class DisplayCoordinator: NSObject {
       pendingRestoreCount = report.remaining.count
       if report.remaining.isEmpty {
         try? recoveryJournal.clear()
-        if !isDegraded(machine.state) { machine = DisplayStateMachine() }
+        // The pending path is what put us into .degraded, so resetting only
+        // when *not* degraded could never fire: the state stayed degraded after
+        // a successful recovery and every later branch on it saw a lie.
+        machine = DisplayStateMachine()
         lastError = nil
+        attentionOverride = nil
         diagnostics.append("A reconnected display completed its pending recovery")
       } else {
         try? rewriteRecoveryRecord()
@@ -1454,7 +1651,24 @@ final class DisplayCoordinator: NSObject {
     case .noJournal:
       return
     case .corrupt(let reason):
-      _ = recoveryJournal.quarantineCorruptJournal()
+      let resolution = resolveUnreadableJournal(reason: reason)
+      if resolution.recoveredFromBackup {
+        let report = restoreEntriesVerified(resolution.entries)
+        recoveryEntries = report.remaining
+        pendingRestoreCount = report.remaining.count
+        if report.remaining.isEmpty {
+          try? recoveryJournal.clear()
+          machine = DisplayStateMachine()
+          lastError = nil
+          attentionOverride = nil
+          diagnostics.append("Pending recovery completed from the last known good journal")
+          return
+        }
+        try? rewriteRecoveryRecord()
+        lastError = Self.pendingRestoreMessage(count: report.remaining.count)
+        diagnostics.append(lastError ?? "", level: "WARN")
+        return
+      }
       lastError = EmberError.journalCorrupt(reason).localizedDescription
       diagnostics.append("Pending recovery retry failed: \(lastError ?? "")", level: "ERROR")
     case .unsupportedFutureSchema(let version):
@@ -1521,8 +1735,11 @@ final class DisplayCoordinator: NSObject {
       return
     }
     do {
-      // If hardware baseline was not captured (getter failed earlier), capture now;
-      // if it still fails, leave automatic brightness untouched (reduced capability).
+      // If the hardware baseline was not captured (the getter failed earlier),
+      // capture it now. `engage` disables automatic brightness and pins the
+      // backlight to full, so it must not run unless a restorable baseline
+      // exists: 0.4.0 logged the failure and then engaged anyway, which left
+      // auto-brightness off with nothing in the journal able to undo it.
       if let index = recoveryEntries.firstIndex(where: { $0.identity.matches(identity) }),
         !recoveryEntries[index].hardware.hasValues
       {
@@ -1532,9 +1749,19 @@ final class DisplayCoordinator: NSObject {
           try? rewriteRecoveryRecord()
         } catch {
           diagnostics.append(
-            "Backlight capture failed; continuing with software dimming: \(error.localizedDescription)",
+            "Backlight baseline could not be captured; leaving hardware brightness untouched: \(error.localizedDescription)",
             level: "WARN")
+          backlightEngagement = .unavailable(
+            "Backlight Lock needs a readable hardware brightness; software dimming continues.")
+          return
         }
+      } else if recoveryEntries.firstIndex(where: { $0.identity.matches(identity) }) == nil {
+        // No journaled entry for this identity means there is nothing to
+        // restore later; refuse rather than change unrecorded hardware state.
+        diagnostics.append(
+          "Backlight Lock refused: no recovery entry exists for the built-in display", level: "WARN")
+        backlightEngagement = .unavailable("Backlight Lock has no saved baseline to restore.")
+        return
       }
       try backlightController.engage(on: target.displayID)
       backlightEngagement = .engaged
@@ -1563,11 +1790,14 @@ final class DisplayCoordinator: NSObject {
     stopBacklightGuard()
     consecutiveBacklightFailures = 0
     guard settings.backlightLockEnabled else { return }
-    // Read-before-write guard: poll modestly, write only on drift, with tolerance.
-    let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
+    // Read-before-write guard: poll modestly, write only on drift, with
+    // tolerance. The interval lives in EmberTiming so the hardware self-test
+    // waits on the same value this schedules.
+    let timer = Timer(timeInterval: EmberTiming.backlightGuardInterval, repeats: true) {
+      [weak self] _ in
       Task { @MainActor in self?.maintainBacklightLock() }
     }
-    timer.tolerance = 1.0
+    timer.tolerance = EmberTiming.backlightGuardTolerance
     RunLoop.main.add(timer, forMode: .common)
     guardTimer = timer
   }
@@ -1886,6 +2116,35 @@ final class DisplayCoordinator: NSObject {
   private static func isRestoring(_ state: DisplayRuntimeState) -> Bool {
     if case .restoring = state { return true }
     return false
+  }
+
+  // MARK: - Test seams
+  //
+  // These expose *what the shipped code does* (armed timers, the periodic
+  // verification pass, override strikes) so tests do not have to wait 30
+  // seconds or mutate a real display to observe it. They are deliberately not
+  // `#if DEBUG`: the release-configuration test run must exercise the same
+  // source as the release build.
+
+  /// Which repeating timers are currently armed.
+  var armedTimers: (health: Bool, backlightGuard: Bool) {
+    (healthTimer != nil, guardTimer != nil)
+  }
+
+  /// Runs exactly what the 30 s health timer runs.
+  func runVerificationPassForTesting(kind: String = "test") async {
+    await runVerificationPass(generation: topologyGeneration, kind: kind)
+  }
+
+  /// Number of recorded external-override strikes for a display.
+  func overrideStrikesForTesting(_ identity: DisplayIdentity) -> Int {
+    overrideTracker.count(key: DisplayTopologySnapshot.key(for: identity), at: clock())
+  }
+
+  /// True while the bounded override pause is suppressing reapplication.
+  var isOverridePausedForTesting: Bool {
+    guard let until = overridePauseUntil else { return false }
+    return until > clock()
   }
 
   private static func isDegraded(_ state: DisplayRuntimeState) -> Bool {

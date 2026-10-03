@@ -4,17 +4,18 @@ import Darwin
 import EmberCore
 import Foundation
 
-struct DisplayTarget: Equatable {
-  let displayID: CGDirectDisplayID
-  let identity: DisplayIdentity
-  let gammaCapacity: UInt32
-
-  var supportsGamma: Bool {
-    gammaCapacity >= 2
-  }
+/// Injection seam for launch-at-login. `LaunchAtLoginController` is a thin
+/// wrapper over `SMAppService`, which cannot be exercised in tests; the
+/// coordinator only needs to read and set the current state.
+@MainActor
+protocol LaunchAtLoginControlling {
+  var isEnabled: Bool { get }
+  func setEnabled(_ enabled: Bool) throws
 }
 
-final class GammaDisplayController {
+extension LaunchAtLoginController: LaunchAtLoginControlling {}
+
+final class GammaDisplayController: DisplayControlling {
   func displayTargets() throws -> [DisplayTarget] {
     var count: UInt32 = 0
     let countResult = CGGetOnlineDisplayList(0, nil, &count)
@@ -71,7 +72,11 @@ final class GammaDisplayController {
     return try captureBaseline(for: target)
   }
 
-  func apply(settings: EmberSettings, to baseline: DisplayBaseline, verify: Bool = true) throws {
+  func apply(settings: EmberSettings, to baseline: DisplayBaseline) throws {
+    try apply(settings: settings, to: baseline, verify: true)
+  }
+
+  func apply(settings: EmberSettings, to baseline: DisplayBaseline, verify: Bool) throws {
     let gains = ColorCurve.gains(forWarmth: settings.warmth)
     let transformed = baseline.gammaTable.applying(
       gains: gains,
@@ -94,7 +99,11 @@ final class GammaDisplayController {
 
   /// Verified restore: writes the saved table and reads back within tolerance.
   /// Recovery entries are removed only after this succeeds.
-  func restoreVerified(_ baseline: DisplayBaseline, tolerance: Float = 0.004) throws {
+  func restoreVerified(_ baseline: DisplayBaseline) throws {
+    try restoreVerified(baseline, tolerance: 0.004)
+  }
+
+  func restoreVerified(_ baseline: DisplayBaseline, tolerance: Float) throws {
     let target = try resolve(baseline: baseline)
     try write(baseline.gammaTable, to: target)
     let readback = try readTable(displayID: target.displayID, capacity: target.gammaCapacity)
@@ -115,7 +124,13 @@ final class GammaDisplayController {
     return current
   }
 
-  func isTransformInstalled(settings: EmberSettings, baseline: DisplayBaseline, tolerance: Float = 0.004) -> Bool {
+  func isTransformInstalled(settings: EmberSettings, baseline: DisplayBaseline) -> Bool {
+    isTransformInstalled(settings: settings, baseline: baseline, tolerance: 0.004)
+  }
+
+  func isTransformInstalled(
+    settings: EmberSettings, baseline: DisplayBaseline, tolerance: Float
+  ) -> Bool {
     (try? verifyTransform(settings: settings, baseline: baseline, tolerance: tolerance)) != nil
   }
 
@@ -270,11 +285,10 @@ final class GammaDisplayController {
   }
 }
 
-final class DisplayServicesBacklightController {
-  struct Capability: Equatable {
-    let brightnessControl: Bool
-    let ambientLightControl: Bool
-  }
+final class DisplayServicesBacklightController: BacklightControlling {
+  /// Kept as a nested alias so existing call sites read unchanged; the shape
+  /// itself lives in EmberCore so the app and its tests share one definition.
+  typealias Capability = BacklightCapability
 
   private typealias GetBrightness =
     @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
@@ -283,7 +297,9 @@ final class DisplayServicesBacklightController {
     @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Bool>) -> Int32
   private typealias SetAmbientLightCompensation = @convention(c) (CGDirectDisplayID, Bool) -> Int32
 
-  private let handle: UnsafeMutableRawPointer?
+  // The dlopen handle is created in init and released in deinit; it is never
+  // shared, but deinit is nonisolated, so the check is opted out of explicitly.
+  private nonisolated(unsafe) let handle: UnsafeMutableRawPointer?
   private let getBrightness: GetBrightness?
   private let setBrightness: SetBrightness?
   private let getAmbientLightCompensation: GetAmbientLightCompensation?
@@ -387,15 +403,18 @@ final class DisplayServicesBacklightController {
 
   /// Read-only drift check for the guard: returns true when a corrective write is needed.
   func needsEngagement(on display: CGDirectDisplayID) -> Bool {
-    guard CGDisplayIsBuiltin(display) != 0, let getBrightness else { return false }
+    guard BacklightDriftCheck.mayEngage(isBuiltIn: CGDisplayIsBuiltin(display) != 0),
+      let getBrightness
+    else { return false }
     var current: Float = 0
     guard getBrightness(display, &current) == 0 else { return false }
-    if current < 0.97 { return true }
+    var ambient: Bool?
     if let getAmbient = getAmbientLightCompensation {
-      var ambient = false
-      if getAmbient(display, &ambient) == 0, ambient { return true }
+      var value = false
+      if getAmbient(display, &value) == 0 { ambient = value }
     }
-    return false
+    return BacklightDriftCheck.needsWrite(
+      currentBrightness: current, ambientEnabled: ambient)
   }
 
   func readBrightness(_ display: CGDirectDisplayID) throws -> Float {

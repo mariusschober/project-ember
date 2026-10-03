@@ -532,7 +532,9 @@ final class HeroStatusView: NSView {
 
     detailLabel.font = EmberFont.heroDetail()
     detailLabel.textColor = EmberColor.textSecondary
-    detailLabel.maximumNumberOfLines = 2
+    // Three lines so the mechanism sentence for custom warmth is never clipped
+    // mid-sentence (audit C4). The panel now scrolls, so a taller hero is safe.
+    detailLabel.maximumNumberOfLines = EmberMetrics.detailMaxLines
     detailLabel.lineBreakMode = .byWordWrapping
     // Static wrap width (see EmberMetrics): deriving it from bounds at layout
     // time feeds the width↔wrap feedback loop that grows the window.
@@ -540,11 +542,20 @@ final class HeroStatusView: NSView {
 
     metaIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
     metaIcon.contentTintColor = EmberColor.textTertiary
+    // Fixed icon box: the meta row is text width + icon width + gap, and the
+    // 198 pt text budget never included the icon (audit C2).
+    metaIcon.imageScaling = .scaleProportionallyDown
+    metaIcon.translatesAutoresizingMaskIntoConstraints = false
+    metaIcon.widthAnchor.constraint(equalToConstant: EmberMetrics.heroMetaIconWidth).isActive = true
+    metaIcon.heightAnchor.constraint(equalToConstant: EmberMetrics.heroMetaIconWidth).isActive = true
 
     metaLabel.font = EmberFont.rowCaption()
     metaLabel.textColor = EmberColor.textSecondary
+    // A single truncated line: meta text is a short status string, never the
+    // body sentence (audit C3), so it can be budgeted exactly.
+    metaLabel.maximumNumberOfLines = 1
     metaLabel.lineBreakMode = .byTruncatingTail
-    metaLabel.preferredMaxLayoutWidth = EmberMetrics.heroTextWidth
+    metaLabel.preferredMaxLayoutWidth = EmberMetrics.heroMetaTextWidth
 
     sunsetLabel.font = EmberFont.rowCaption()
     sunsetLabel.textColor = EmberColor.textMuted
@@ -558,7 +569,7 @@ final class HeroStatusView: NSView {
 
     let metaRow = NSStackView(views: [metaIcon, metaLabel])
     metaRow.orientation = .horizontal
-    metaRow.spacing = 5
+    metaRow.spacing = EmberMetrics.heroMetaIconGap
     metaRow.alignment = .centerY
 
     let metaStack = NSStackView(views: [metaRow, sunsetLabel])

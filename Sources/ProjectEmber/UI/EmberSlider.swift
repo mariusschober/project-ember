@@ -29,8 +29,9 @@ final class EmberSliderCell: NSSliderCell {
     let path = NSBezierPath(roundedRect: trackRect, xRadius: trackHeight/2, yRadius: trackHeight/2)
 
     NSGraphicsContext.saveGraphicsState()
-    // Background track (unfilled)
-    NSColor(calibratedWhite: 0.22, alpha: alpha).setFill()
+    // Unfilled travel. 0.22 white measured 1.41:1 against the panel; 0.42
+    // reaches the >=3:1 that WCAG 1.4.11 asks of a control's boundary (M4).
+    EmberColor.controlBoundary.withAlphaComponent(alpha).setFill()
     path.fill()
 
     // Filled portion
@@ -189,6 +190,15 @@ final class EmberSlider: NSSlider {
   }
 
   required init?(coder: NSCoder) { fatalError() }
+
+  /// NSSlider normally publishes role/value through its cell; this subclass
+  /// swaps in a custom cell and ended up as AXUnknown with no value, so the
+  /// warmth and brightness sliders were unreadable to VoiceOver. Publishing the
+  /// role, value and range explicitly fixes that.
+  override func accessibilityRole() -> NSAccessibility.Role? { .slider }
+  override func accessibilityValue() -> Any? { doubleValue }
+  override func accessibilityMinValue() -> Any? { minValue }
+  override func accessibilityMaxValue() -> Any? { maxValue }
 
   override func awakeFromNib() {
     super.awakeFromNib()

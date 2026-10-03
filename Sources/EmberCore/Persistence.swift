@@ -105,6 +105,12 @@ public final class RecoveryJournal: @unchecked Sendable {
       guard !data.isEmpty else { return .corrupt(reason: "Recovery journal is empty") }
       do {
         let record = try decoder.decode(RecoveryRecord.self, from: data)
+        // A record that decodes but cannot describe a real display state is
+        // still unusable: treat it as corrupt so it takes quarantine/backup
+        // instead of being written to a panel.
+        if let failure = record.validationFailure() {
+          return .corrupt(reason: failure)
+        }
         return .loaded(record)
       } catch let error as DecodingError {
         let description = String(describing: error)
@@ -164,6 +170,23 @@ public final class RecoveryJournal: @unchecked Sendable {
     } catch {
       return nil
     }
+  }
+
+  /// Last-resort recovery for an unreadable primary journal.
+  ///
+  /// The journal has always maintained a last-known-good copy next to itself,
+  /// but nothing ever read it, so a single torn write silently downgraded an
+  /// exact restore into a system colour reset. This reads the copy *before*
+  /// quarantining, and only reports success when the backup decodes and passes
+  /// the same validation as a primary record. When there is no usable backup
+  /// the unreadable file is left untouched for the caller to quarantine.
+  public func recoverCorruptJournalFromBackup() -> RecoveryRecord? {
+    guard let data = try? Data(contentsOf: backupURL), !data.isEmpty,
+      let record = try? decoder.decode(RecoveryRecord.self, from: data),
+      record.validationFailure() == nil
+    else { return nil }
+    quarantineCorruptJournal()
+    return record
   }
 
   public func clear() throws {
