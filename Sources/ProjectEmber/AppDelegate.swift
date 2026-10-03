@@ -208,13 +208,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     button.toolTip = "Project Ember"
     button.setAccessibilityLabel("Project Ember display controls")
     button.setAccessibilityHelp(
-      "Left click follows the Menu bar click setting. Right click opens a menu with controls, diagnostics, about and quit."
+      "Left click follows the Menu bar click setting. Right click or Control-click opens the controls. Option-click opens a menu with controls, diagnostics, about and quit."
     )
     buildStatusMenu()
   }
 
-  /// Right-click menu. Quitting must never depend on the popover being visible
-  /// or reachable: this app has no Dock icon and no app menu (audit C1).
+  /// Alternate-action menu, shown on Option-click. Kept because this app has no
+  /// Dock icon and no app menu, so a path to Quit that does not depend on the
+  /// popover is worth having — but it must not shadow the primary gesture, which
+  /// is why 0.5.0's right-click mapping was reverted.
   private func buildStatusMenu() {
     let menu = NSMenu()
     menu.autoenablesItems = false
@@ -371,7 +373,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     button.setAccessibilityLabel(description)
     button.setAccessibilityValue(value)
     button.setAccessibilityHelp(
-      "Left click: \(snapshot.settings.menuBarPrimaryAction == .toggleEmber ? "toggle Ember" : "open controls"). Right click opens a menu with controls, diagnostics, about and quit."
+      "Left click: \(snapshot.settings.menuBarPrimaryAction == .toggleEmber ? "toggle Ember" : "open controls"). Right click or Control-click opens the controls. Option-click opens a menu with controls, diagnostics, about and quit."
     )
   }
 
@@ -380,15 +382,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       togglePopover()
       return
     }
-    // Right-click / secondary / two-finger / Control-click opens the menu, so
-    // Quit and Diagnostics are reachable even when the popover cannot be.
-    if event.type == .rightMouseUp {
+    // Gesture routing lives in EmberCore so the documented behaviour has one
+    // definition and a test (MenuBarRouting.statusClick).
+    let route = MenuBarRouting.statusClick(
+      isRightClick: event.type == .rightMouseUp,
+      isControlClick: event.type == .leftMouseUp && event.modifierFlags.contains(.control),
+      isOptionClick: event.type == .leftMouseUp && event.modifierFlags.contains(.option)
+    )
+    switch route {
+    case .openControls:
+      // Right-click, two-finger click and Control-click open the controls, as
+      // 0.4.0 behaved and as the README documents. 0.5.0 briefly put the menu
+      // here, which shadowed the gesture users had learned.
+      openControls()
+      return
+    case .showAlternateMenu:
+      // Option-click is the standard macOS alternate action: the same menu,
+      // kept as the safety net for quitting without the popover.
       showStatusMenu()
       return
-    }
-    if event.type == .leftMouseUp, event.modifierFlags.contains(.control) {
-      showStatusMenu()
-      return
+    case .primaryAction:
+      break
     }
     // Left click routes according to preference.
     let result = coordinator.handlePrimaryClick()

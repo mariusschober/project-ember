@@ -186,3 +186,34 @@ struct JournalIntegrityTests {
     #expect(version == 99)
   }
 }
+
+/// The status-item gesture map is documented behaviour (README: "right-click
+/// always opens controls"), so it is pinned here. 0.5.0 briefly moved the
+/// alternate menu onto right-click and shadowed the gesture users had learned.
+@Suite("Status item click routing")
+struct StatusClickRoutingTests {
+
+  @Test("Right-click, two-finger click and Control-click open the controls")
+  func opensControls() {
+    #expect(
+      MenuBarRouting.statusClick(isRightClick: true, isControlClick: false, isOptionClick: false)
+        == .openControls)
+    #expect(
+      MenuBarRouting.statusClick(isRightClick: false, isControlClick: true, isOptionClick: false)
+        == .openControls)
+    // Right-click wins even when Option is also held.
+    #expect(
+      MenuBarRouting.statusClick(isRightClick: true, isControlClick: false, isOptionClick: true)
+        == .openControls)
+  }
+
+  @Test("Option-click opens the alternate menu, a plain click follows the preference")
+  func alternateAndPrimary() {
+    #expect(
+      MenuBarRouting.statusClick(isRightClick: false, isControlClick: false, isOptionClick: true)
+        == .showAlternateMenu)
+    #expect(
+      MenuBarRouting.statusClick(isRightClick: false, isControlClick: false, isOptionClick: false)
+        == .primaryAction)
+  }
+}

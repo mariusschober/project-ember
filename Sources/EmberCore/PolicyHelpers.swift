@@ -45,6 +45,33 @@ public enum MenuBarRouting: Sendable {
     case ignoredBusy
   }
 
+  /// What a click on the status item should do.
+  public enum StatusClick: Equatable, Sendable {
+    /// Show the control panel. This is the documented behaviour for
+    /// right-click, two-finger click and Control-click.
+    case openControls
+    /// Show the alternate menu (Open Controls, Diagnostics, About, Quit).
+    case showAlternateMenu
+    /// Defer to the saved Menu bar click preference.
+    case primaryAction
+  }
+
+  /// Gesture routing for the status item.
+  ///
+  /// This lives here rather than inside the delegate so the documented click
+  /// behaviour has exactly one definition and a test that fails if someone
+  /// re-maps it: 0.5.0 briefly moved the alternate menu onto right-click, which
+  /// shadowed the gesture users had learned from 0.4.0.
+  public static func statusClick(
+    isRightClick: Bool,
+    isControlClick: Bool,
+    isOptionClick: Bool
+  ) -> StatusClick {
+    if isRightClick || isControlClick { return .openControls }
+    if isOptionClick { return .showAlternateMenu }
+    return .primaryAction
+  }
+
   public static func route(
     action: MenuBarPrimaryAction,
     isBusy: Bool,

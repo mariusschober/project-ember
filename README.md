@@ -26,7 +26,8 @@ Developer ID-signed, notarized public artifacts.
 - Launch at login, local recovery journaling, local diagnostics
   (Copy/Export, sanitized identifiers), custom-drawn menu-bar interface
 - Menu-bar click behavior: Open Controls (default) or Toggle Ember;
-  right-click always opens controls
+  right-click, two-finger click and Control-click always open controls;
+  Option-click opens the alternate menu (Open Controls, Diagnostics, About, Quit)
 - Single-view control panel (fitted, no scrolling): click the hero orb to turn
   Ember on/off; footer credit links to the author's website
 
