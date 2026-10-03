@@ -120,6 +120,14 @@ public struct DisplayStateMachine: Sendable {
       state = .active
       return [.publishPresentation]
 
+    // A degraded state that reconciliation has fully repaired returns to active.
+    // Without this, a display unplugged and replugged while Ember was on stayed
+    // degraded even after it verified again, which silently disabled live
+    // updates, the health check and the backlight guard.
+    case (.degraded, .reconciliationSucceeded):
+      state = .active
+      return [.publishPresentation]
+
     case (.reconciling, let .reconciliationFailed(message)):
       state = .degraded(message)
       return [.publishPresentation]

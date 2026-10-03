@@ -280,6 +280,140 @@ struct BacklightSafetyTests {
   }
 }
 
+// MARK: - Reconciliation recovery (regressions found by adversarial review)
+
+@Suite("Reconciliation recovery")
+@MainActor
+struct ReconciliationRecoveryTests {
+
+  @Test("Unplugging and replugging the only display returns Ember to active")
+  func replugRecoversFromDegraded() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays, settings: EmberSettings(filterEnabled: true))
+
+    coordinator.start()
+    #expect(coordinator.currentSnapshot().runtimeState == .active)
+
+    // Unplug: nothing verified, so the machine degrades.
+    displays.targets = []
+    coordinator.handleDisplayEvent(displayID: 1, flags: 0, isBegin: false)
+    let settled = await waitUntil("degraded after unplug") {
+      let snapshot = coordinator.currentSnapshot()
+      return snapshot.verifiedDisplayCount == 0
+        && snapshot.runtimeState != .reconciling
+        && snapshot.runtimeState != .active
+    }
+    #expect(settled, "an unplug with nothing left must end in a settled degraded state")
+    #expect(coordinator.currentSnapshot().verifiedDisplayCount == 0)
+
+    // Replug: the saved baseline is applied and the display verifies again. A
+    // successful reconciliation must be able to leave the degraded state, or
+    // live updates and the health check stay dead while the panel says "on".
+    displays.targets = [target]
+    displays.tables[1] = GammaTable.identity()
+    coordinator.handleDisplayEvent(displayID: 1, flags: 0, isBegin: false)
+
+    let recovered = await waitUntil("active again after replug") {
+      coordinator.currentSnapshot().runtimeState == .active
+    }
+    #expect(recovered, "a replugged display must return Ember to .active")
+    #expect(coordinator.currentSnapshot().verifiedDisplayCount == 1)
+    #expect(coordinator.armedTimers.health, "verification resumes with the state")
+
+    // Prove the consequence: a live change now reaches the display.
+    coordinator.setWarmth(0.9)
+    let applied = await waitUntil("warmth reaches the panel", timeout: 2) {
+      guard let table = displays.tables[1] else { return false }
+      return table.maximumAbsoluteDifference(from: GammaTable.identity()) > 0.01
+    }
+    #expect(applied, "while stuck degraded, warmth changes never reached the display")
+  }
+
+  @Test("A sticky journal warning survives a successful toggle-off")
+  func stickyWarningSurvivesSuccessfulRestore() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    let journal = FakeJournal(exists: true, outcome: .corrupt(reason: "torn write"))
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays, journal: journal, settings: EmberSettings(filterEnabled: true))
+
+    // Unclean startup with an unreadable journal → sticky warning, Ember off.
+    coordinator.start()
+    #expect(coordinator.currentSnapshot().attentionTitle == "Needs attention")
+
+    // Turn on (captures a fresh baseline) and off again; the restore succeeds,
+    // but "exact restoration cannot be claimed" is about the record we could
+    // not read and must not disappear because a later pass worked.
+    coordinator.setFilterEnabled(true)
+    _ = await waitUntil("activation") { coordinator.currentSnapshot().runtimeState == .active }
+    coordinator.setFilterEnabled(false)
+    _ = await waitUntil("restore") { coordinator.currentSnapshot().runtimeState == .off }
+
+    #expect(
+      displays.restoreCount > 0, "the toggle-off really did restore something")
+    #expect(
+      coordinator.currentSnapshot().attentionTitle == "Needs attention",
+      "a sticky journal warning must survive a successful restore")
+  }
+
+  @Test("Reset releases the verification timer")
+  func resetStopsHealthCheck() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays, settings: EmberSettings(filterEnabled: true))
+
+    coordinator.start()
+    _ = await waitUntil("activation") { coordinator.currentSnapshot().runtimeState == .active }
+    #expect(coordinator.armedTimers.health)
+
+    coordinator.resetDisplayNow()
+    #expect(coordinator.currentSnapshot().runtimeState == .off)
+    #expect(
+      coordinator.armedTimers.health == false,
+      "reset leaves Ember off, so the 30 s verification timer must not stay armed")
+  }
+
+  @Test("Backlight Lock engages on a reused baseline while its display is present")
+  func reusedBaselineStillEngagesBacklight() async {
+    let target = Fixture.target(1, identity: builtIn)
+    let entry = Fixture.entry(
+      for: target,
+      hardware: HardwareBaseline(brightness: 0.5, ambientLightCompensationEnabled: true)
+    )
+    let record = RecoveryRecord(
+      appVersion: "0.5.0", displays: [entry], intendedSettings: .default)
+
+    let displays = FakeDisplay(targets: [target], tables: [1: GammaTable.identity()])
+    // Restore verification keeps failing, so the entry stays pending and its
+    // saved baseline is reused rather than recaptured.
+    displays.restoreFailures = [1]
+    let backlight = FakeBacklight()
+    let journal = FakeJournal(exists: true, outcome: .loaded(record))
+
+    let (coordinator, _, _) = makeCoordinator(
+      displays: displays,
+      backlight: backlight,
+      journal: journal,
+      settings: EmberSettings(filterEnabled: true, backlightLockEnabled: true)
+    )
+
+    coordinator.start()
+    coordinator.setFilterEnabled(true)
+    _ = await waitUntil("activation from the saved baseline") {
+      coordinator.currentSnapshot().runtimeState == .active
+    }
+
+    #expect(backlight.engageCount == 1, "a present, capable built-in panel must be engaged")
+    if case .engaged = coordinator.currentSnapshot().backlightEngagement {} else {
+      Issue.record(
+        "Backlight Lock reported \(coordinator.currentSnapshot().backlightEngagement) on a present panel")
+    }
+  }
+}
+
 // MARK: - Live menu-bar routing and override back-off
 
 @Suite("Menu-bar routing (live path)")

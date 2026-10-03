@@ -28,6 +28,12 @@ let package = Package(
     .testTarget(name: "EmberCoreTests", dependencies: ["EmberCore"]),
     // Drives DisplayCoordinator through injected fakes: the shipped
     // orchestration is otherwise only reachable by mutating real displays.
+    //
+    // Note: because it imports the executable target, `swift build --build-tests
+    // -c release` needs testability enabled explicitly —
+    //   swift build --build-tests -c release -Xswiftc -enable-testing
+    // `swift test` and `swift test -c release` both work as-is, and those are the
+    // commands the release scripts and CI use.
     .testTarget(name: "ProjectEmberTests", dependencies: ["ProjectEmber", "EmberCore"]),
   ],
   swiftLanguageModes: [.v6]

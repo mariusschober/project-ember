@@ -237,14 +237,18 @@ enum Fixture {
     DisplayTarget(displayID: id, identity: identity, gammaCapacity: capacity)
   }
 
-  static func entry(for target: DisplayTarget) -> DisplayRecoveryEntry {
+  static func entry(
+    for target: DisplayTarget,
+    hardware: HardwareBaseline = .empty
+  ) -> DisplayRecoveryEntry {
     DisplayRecoveryEntry(
       identity: target.identity,
       display: DisplayBaseline(
         displayID: target.displayID,
         identity: target.identity,
         gammaTable: GammaTable.identity()
-      )
+      ),
+      hardware: hardware
     )
   }
 }

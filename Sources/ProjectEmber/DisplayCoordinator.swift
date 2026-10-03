@@ -206,34 +206,9 @@ final class DisplayCoordinator: NSObject {
   }
 
   func currentSnapshot() -> EmberSnapshot {
-    if UserDefaults(suiteName: "app.projectember.visual-qa")?.bool(forKey: "forceActiveSnapshot") == true,
-      CommandLine.arguments.contains("--snapshot-ui")
-    {
-      let count = max(compatibleDisplayCount, 1)
-      return EmberSnapshot(
-        settings: settings,
-        runtimeState: .active,
-        statusTitle: "Ember is on",
-        statusDetail: "Active on \(count) \(count == 1 ? "display" : "displays").",
-        displayAvailable: true,
-        availableDisplayCount: max(availableDisplayCount, count),
-        controlledDisplayCount: count,
-        unsupportedDisplayCount: 0,
-        pendingRestoreCount: 0,
-        backlightAvailable: backlightCapability.brightnessControl,
-        ambientLightControlAvailable: backlightCapability.ambientLightControl,
-        solarStatusDetail: solarStatusDetail(),
-        showLocationSettings: false,
-        isBusy: false,
-        isObservedActive: true,
-        verifiedDisplayCount: count,
-        failedDisplayCount: 0,
-        attentionTitle: nil,
-        attentionMessage: nil,
-        backlightEngagement: backlightEngagement,
-        solarPresentation: solarPresentationData()
-      )
-    }
+#if DEBUG
+    if let forced = visualQAForcedSnapshot() { return forced }
+#endif
     let presentation = buildPresentation()
     let busy =
       machine.state == .activating || machine.state == .reconciling
@@ -376,7 +351,7 @@ final class DisplayCoordinator: NSObject {
     settings.sunScheduleEnabled = enabled
     settings.automationOverride = nil
     lastError = nil
-    attentionOverride = nil
+    if !attentionIsSticky { attentionOverride = nil }
 
     if enabled {
       do {
@@ -517,6 +492,8 @@ final class DisplayCoordinator: NSObject {
     pendingTransformTimer?.invalidate()
     pendingTransformTimer = nil
     stopBacklightGuard()
+    // Reset leaves Ember off; the verification timer has nothing left to verify.
+    stopHealthCheck()
     let entries = loadJournalEntriesForMutation()
     var report = restoreEntriesVerified(entries)
     // An empty work list is not proof that the display is already correct: it
@@ -713,32 +690,43 @@ final class DisplayCoordinator: NSObject {
         throw EmberError.noCompatibleDisplay
       }
 
-      // Backlight: capture only on verified compatible built-in target, and only
-      // when the current value was read successfully (stored in recovery entry).
+      // Journal before mutation (invariant 1). Built first so the backlight
+      // selection below can consider every journaled entry, including baselines
+      // reused from a previous session.
+      recoveryEntries = pendingEntries + freshEntries
+      try rewriteRecoveryRecord()
+
+      // Backlight: capture only on a verified compatible built-in target, and
+      // only when the current value reads successfully (stored in the recovery
+      // entry). Reused entries are eligible too — their display is present
+      // again, and the value captured in the earlier session may still be valid.
       backlightIdentity = nil
       backlightCapability = .init(brightnessControl: false, ambientLightControl: false)
       if settings.backlightLockEnabled {
-        for index in freshEntries.indices {
-          let entry = freshEntries[index]
+        for index in recoveryEntries.indices {
+          let entry = recoveryEntries[index]
           guard entry.identity.isBuiltIn,
-            let target = try gammaController.target(matching: entry.identity)
+            let target = try gammaController.target(matching: entry.identity),
+            target.identity.isBuiltIn
           else { continue }
-          guard target.identity.isBuiltIn else { continue }
           let capability = backlightController.capability(for: target.displayID)
           guard capability.brightnessControl else { continue }
-          do {
-            freshEntries[index].hardware = try backlightController.captureBaseline(
-              for: target.displayID
-            )
-            backlightIdentity = entry.identity
-            backlightCapability = capability
-            break
-          } catch {
-            diagnostics.append(
-              "Backlight baseline capture failed; continuing with software dimming: \(error.localizedDescription)",
-              level: "WARN"
-            )
+          if !recoveryEntries[index].hardware.hasValues {
+            do {
+              recoveryEntries[index].hardware = try backlightController.captureBaseline(
+                for: target.displayID
+              )
+            } catch {
+              diagnostics.append(
+                "Backlight baseline capture failed; continuing with software dimming: \(error.localizedDescription)",
+                level: "WARN"
+              )
+              continue
+            }
           }
+          backlightIdentity = entry.identity
+          backlightCapability = capability
+          break
         }
         if backlightIdentity == nil {
           backlightEngagement = .unavailable("Backlight Lock is unavailable on the current display.")
@@ -746,8 +734,6 @@ final class DisplayCoordinator: NSObject {
         }
       }
 
-      // Journal before mutation (invariant 1).
-      recoveryEntries = pendingEntries + freshEntries
       pendingRestoreCount = pendingEntries.count
       try rewriteRecoveryRecord()
       diagnostics.append(
@@ -893,6 +879,11 @@ final class DisplayCoordinator: NSObject {
       // unreadable journal must not be silently forgotten by a toggle or quit.
       if report.outcomes.isEmpty {
         diagnostics.append("Nothing to restore; no journaled baseline was outstanding")
+      } else if attentionIsSticky {
+        // The restore itself succeeded, but a standing "exact restoration
+        // cannot be claimed" warning is about a record we could not read, not
+        // about this pass. Only Retry/Reset clear it.
+        diagnostics.append("Saved state restored for every available display")
       } else {
         lastError = nil
         attentionOverride = nil
@@ -1221,7 +1212,14 @@ final class DisplayCoordinator: NSObject {
         severity: .error, title: "Needs attention", message: message,
         recoveryActions: ["Retry", "Reset"])
     } else {
-      if machine.state == .reconciling { _ = machine.transition(.reconciliationSucceeded) }
+      // A reconciliation that verified something must be able to leave a
+      // degraded state, not just a reconciling one. Unplugging the only display
+      // puts the machine in .degraded; replugging re-verifies it, and without
+      // this the app stayed degraded while the panel said "Ember is on" — which
+      // silently disabled live updates and the health check.
+      if machine.state == .reconciling || isDegraded(machine.state) {
+        _ = machine.transition(.reconciliationSucceeded)
+      }
       if failedIdentities.isEmpty { lastError = nil; attentionOverride = nil }
       else {
         lastError = failedIdentities.values.joined(separator: " ")
@@ -1889,6 +1887,44 @@ final class DisplayCoordinator: NSObject {
       publishSnapshot()
     }
   }
+
+#if DEBUG
+  /// Visual-QA only: a forced "active" snapshot so the panel can be rendered in
+  /// a state the machine is not actually in. Compiled out of release builds —
+  /// 0.4.0 shipped this hook, so a QA defaults suite could make the panel
+  /// display a state the app was not in.
+  private func visualQAForcedSnapshot() -> EmberSnapshot? {
+    guard
+      UserDefaults(suiteName: "app.projectember.visual-qa")?.bool(forKey: "forceActiveSnapshot")
+        == true,
+      CommandLine.arguments.contains("--snapshot-ui")
+    else { return nil }
+    let count = max(compatibleDisplayCount, 1)
+    return EmberSnapshot(
+      settings: settings,
+      runtimeState: .active,
+      statusTitle: "Ember is on",
+      statusDetail: "Active on \(count) \(count == 1 ? "display" : "displays").",
+      displayAvailable: true,
+      availableDisplayCount: max(availableDisplayCount, count),
+      controlledDisplayCount: count,
+      unsupportedDisplayCount: 0,
+      pendingRestoreCount: 0,
+      backlightAvailable: backlightCapability.brightnessControl,
+      ambientLightControlAvailable: backlightCapability.ambientLightControl,
+      solarStatusDetail: solarStatusDetail(),
+      showLocationSettings: false,
+      isBusy: false,
+      isObservedActive: true,
+      verifiedDisplayCount: count,
+      failedDisplayCount: 0,
+      attentionTitle: nil,
+      attentionMessage: nil,
+      backlightEngagement: backlightEngagement,
+      solarPresentation: solarPresentationData()
+    )
+  }
+#endif
 
   private func solarPresentationData() -> SolarPresentationData {
     SolarPresentationData(
